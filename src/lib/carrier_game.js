@@ -467,9 +467,15 @@ function finishCracks(p, seed) {
         var r = rng(hash32(seed + '|crack|' + j.num));
         var users = someUsersFor(j.num, 5);
         var accts = [[users[1], pick(r, CRACK_WORDS), false], [users[3], pick(r, CRACK_WORDS), false]];
-        //  a root password a player set falls to the wordlist if it's weak
-        var rootNow = keepLoad(seed, j.num).pw.root;
-        if (rootNow !== undefined && crackWeak(rootNow, users)) accts.push(['root', rootNow, true]);
+        //  a password a player set (root's, SYSTEM's) or an account a
+        //  player added falls to the wordlist if it's weak
+        var ov = keepLoad(seed, j.num);
+        Object.keys(ov.pw).forEach(function (u) {
+            if (crackWeak(ov.pw[u], users)) accts.push([u, ov.pw[u], true]);
+        });
+        Object.keys(ov.acc).forEach(function (u) {
+            if (crackWeak(ov.acc[u][0], users)) accts.push([u, ov.acc[u][0], !!ov.acc[u][1]]);
+        });
         p.cracked = p.cracked || {};
         p.cracked[j.num] = accts;
         p.crackedAt = p.crackedAt || {};
@@ -501,11 +507,12 @@ function crackWeak(pw, users) {
         /^[a-z]{1,6}$/.test(pw);
 }
 
-//  Whether root's password on num was changed after the player last ran
-//  Crack there, so another run is worth it
+//  Whether a password on num was set after the player last ran Crack
+//  there, so another run is worth it
 function crackStale(p, seed, num) {
-    var by = keepLoad(seed, num).pwBy.root;
-    return !!by && by[2] > ((p.crackedAt || {})[num] || 0);
+    var by = keepLoad(seed, num).pwBy;
+    var at = (p.crackedAt || {})[num] || 0;
+    return Object.keys(by).some(function (u) { return by[u][2] > at; });
 }
 
 //  The made-up users of a host (as carrier_hosts.js someUsers names them)

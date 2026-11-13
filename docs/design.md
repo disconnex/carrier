@@ -241,9 +241,9 @@ contributed gets rep and codes, and the top contributors are named.
      posters, uploaders and downloaders, and CARRiER's rep and first
      finds read from the game's store.
 6. **Real systems** (in progress: steps 1 and 2 of 7 live on City of Thieves,
-   step 3 built for UNIX;
+   step 3 built;
    see Real systems below). Every host gets a filesystem and a shell like
-   the real one, and what players leave on UNIX hosts now lasts (step 3).
+   the real one, and what players leave on them now lasts (step 3).
 
 ## Real systems (phase 6, in progress)
 
@@ -549,7 +549,8 @@ In steps, each playable:
        the prize is the CPU allocations (40 rep).
      The notebook has a page for each (hackfaq.txt, cert9106.txt,
      ciac.b17).
-3. **Persistence** (built for UNIX 2026-11-13: src/lib/carrier_keep.js).
+3. **Persistence** (built 2026-11-13: src/lib/carrier_keep.js; UNIX first,
+   then VMS, PRIMOS and MPE the same day).
    Each host's changes are kept per season in the game's store, laid over
    the generated tree on the next call, and saved after every command, so
    two players on one box don't undo each other. Kept: files written,
@@ -562,9 +563,20 @@ In steps, each playable:
    other players on the host now or lately, under the account they used.
    A player whose file or password someone else changed is told so on
    their next game, but not by whom. Limits: 16 changed files and 8 KB per
-   host, 20 changes per player (the oldest goes back). Next: the same for
-   VMS (AUTHORIZE, SYSUAF), PRIMOS and MPE; `ed`; live `write` between two
-   players on one box.
+   host, 20 changes per player (the oldest goes back).
+   - VMS: `AUTHORIZE ADD` (default password USER, `/PRIVILEGES=ALL` for a
+     privileged one) adds a backdoor account; `SET PASSWORD` as, or
+     `MODIFY .../PASSWORD=` of, a privileged account takes the box. Each
+     leaves a security alarm in `OPERATOR.LOG` naming the account that did
+     it. `SHOW USERS` and `MAIL` reach other players.
+   - PRIMOS: `EDIT_PROFILE`'s `ADD_USER name [-SAD]` and `CHANGE_PASSWORD`
+     as SYSTEM, logged in `SAD>EDIT_PROFILE.LOG`; `STATUS USERS`.
+   - MPE: `NEWUSER user;PASS=pw;CAP=SM` and `ALTUSER MANAGER.SYS;PASS=pw`
+     (new commands, SM or AM only), logged in the newest `LOG####.PUB.SYS`,
+     which `PURGE LOG@.PUB.SYS` takes away; `SHOWJOB`.
+   - Crack runs on a stolen SYSUAF list or PRIMOS user list too, and gets
+     any weak password a player set or any weak account a player added.
+   Not done: `ed`; live `write` between two players on one box.
 4. **Admin sweeps** and hiding.
 5. **The landmarks**, a few at a time, with their area codes.
 6. **The CTF engine** and the first season's CTF.

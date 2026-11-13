@@ -259,6 +259,7 @@ function mpeWrite(sh, s, text) {
     delete f.size;
     f.mt = mpeDate(0);
     gl.node.kids[n.file] = f;
+    keepMark(sh.fs, '/' + n.acct + '/' + n.group + '/' + n.file);
     return f;
 }
 
@@ -268,6 +269,7 @@ var MPE_QUIET = ['LISTF', 'SHOWME', 'SHOWJOB', 'SHOWTIME', 'HELP', 'CHGROUP'];
 
 function runHP(ctx, io) {
     var h = ctx.host;
+    ctx.ov = keepLoad(ctx.seed, h.num);
     var t = era();
     io.out('\r\n:');
     var acct = null;
@@ -282,7 +284,7 @@ function runHP(ctx, io) {
         }
         var ua = m[1].toUpperCase();
         group = (m[5] || 'PUB').toUpperCase();
-        var all = h.accounts.concat(mpeStaff(mpeWorld(ctx)));
+        var all = keepAccounts(ctx, h.accounts.concat(mpeStaff(mpeWorld(ctx))), true);
         var match = all.filter(function (a) { return a[0] === ua; });
         if (!match.length) {
             var acctPart = ua.split('.')[1];
@@ -315,6 +317,7 @@ function runHP(ctx, io) {
         return;
     }
     var fs = mpeTree(ctx);
+    keepOpen(ctx, fs, function () { return mpeTree(ctx); });
     var w = fs.w;
     var who = acct[0].toUpperCase();
     var acctName = who.split('.')[1];
@@ -328,6 +331,15 @@ function runHP(ctx, io) {
     var sh = { ctx: ctx, io: io, fs: fs, w: w, user: who, acct: acctName, group: group, priv: priv, job: 100 + h.users, pw: acct[1] };
     sh.who = { user: who, groups: [acctName], root: !!priv };
     sh.out = function (s) { io.out(unixLines(s)); };
+    sh.tty = 'LDEV ' + (20 + v3.util.random(9));
+    sh.on = keepOn(ctx, who, sh.tty);
+    mpeShell(sh);
+    keepOff(ctx, sh.on);
+}
+
+function mpeShell(sh) {
+    var ctx = sh.ctx;
+    var io = sh.io;
     for (;;) {
         io.out(':');
         var cmd = io.line(true);
@@ -348,8 +360,35 @@ function runHP(ctx, io) {
             sh.after = null;
             after.forEach(function (f) { f(ctx, io); });
         }
+        if (keepSave(sh.fs) === 'full') {
+            sh.out('OUT OF DISC SPACE  (FSERR 46)\n');
+            io.say('This HP has no room for more of what players leave. What you just did lasts only this call.');
+        }
         if (res === 'exit' || io.over) return;
     }
+}
+
+//  An entry in the newest system log file: who changed the directory, and
+//  how. LISTLOG would show it; PURGE LOG@.PUB.SYS takes it away.
+function mpeAudit(sh, what) {
+    var logs = Object.keys(fsLook(sh.fs, '/', '/SYS/PUB', { root: true }).node.kids).filter(function (k) { return /^LOG\d{4}$/.test(k); }).sort();
+    if (!logs.length) return;
+    keepLog(sh.fs, '/SYS/PUB/' + logs[logs.length - 1], [era().hp + '  ' + sh.user + '  ' + what], 40);
+}
+
+//  Whether name is a privileged user the host came with
+function mpePrivAccount(sh, name) {
+    return name === 'MANAGER.SYS' || sh.ctx.host.accounts.concat(mpeStaff(sh.w)).some(function (a) { return a[0].toUpperCase() === name && a[2]; });
+}
+
+//  ;PASS=x and ;CAP=y from a NEWUSER or ALTUSER line
+function mpeParms(a) {
+    var out = {};
+    a.split(';').slice(1).forEach(function (kv) {
+        var m = /^\s*([A-Z]+)\s*=\s*(.*?)\s*$/i.exec(kv);
+        if (m) out[m[1].toUpperCase()] = m[2];
+    });
+    return out;
 }
 
 var MPE_HELP = {
@@ -396,6 +435,9 @@ var MPE_CMDS = {
         if (adminOnline(sh.ctx)) out += '#S2     EXEC        20   20       ' + t + '  MANAGER.SYS\n';
         sh.w.staff.slice(1, 1 + Math.min(4, sh.w.h.users)).forEach(function (n, i) {
             out += fit('#S' + (40 + i * 7), 8) + 'EXEC        ' + fit(String(30 + i), 5) + fit(String(30 + i), 9) + t + '  ' + n + '.' + sh.w.org + '\n';
+        });
+        keepOthersOn(sh.ctx.seed, sh.w.h.num).forEach(function (x, i) {
+            out += fit('#S' + (sh.job - 3 - i), 8) + 'EXEC        20   20       ' + t + '  ' + x.u + '\n';
         });
         out += fit('#S' + sh.job, 8) + 'EXEC        20   20       ' + t + '  ' + sh.user + '\n';
         sh.out(out + '\n');
@@ -475,6 +517,7 @@ var MPE_CMDS = {
             }
             if (f.node.log) logs++;
             delete f.gnode.kids[f.file];
+            keepMark(sh.fs, '/' + f.acct + '/' + f.group + '/' + f.file);
         });
         if (logs) cleaned(sh.ctx, sh.io);
     },
@@ -515,6 +558,8 @@ var MPE_CMDS = {
         }
         delete f.gnode.kids[f.file];
         gl.node.kids[to.file] = f.node;
+        keepMark(sh.fs, '/' + f.acct + '/' + f.group + '/' + f.file);
+        keepMark(sh.fs, '/' + to.acct + '/' + to.group + '/' + to.file);
     },
     TELL: function (sh, a) {
         var m = /^([A-Z0-9.#]+)\s*;?\s*(.*)$/i.exec(a);
@@ -533,6 +578,8 @@ var MPE_CMDS = {
         if (bluff(sh.ctx, sh.io, a)) return 'exit';
     },
     LISTUSER: function (sh, a) { return mpeListUser(sh, a); },
+    NEWUSER: function (sh, a) { return mpeNewUser(sh, a); },
+    ALTUSER: function (sh, a) { return mpeAltUser(sh, a); },
     LISTACCT: function (sh, a) {
         if (!sh.priv) {
             sh.out('LACKING SM OR AM CAPABILITY.  (CIERR 3010)\n');
@@ -593,7 +640,7 @@ function mpeListUser(sh, a) {
     var parts = set.split('.');
     var ure = mpePattern(parts[0] || '@');
     var are = mpePattern(parts[1] || sh.acct);
-    var users = sh.ctx.host.accounts.concat(mpeStaff(sh.w)).map(function (x) { return [x[0].toUpperCase(), String(x[1]).toUpperCase(), x[2]]; });
+    var users = keepAccounts(sh.ctx, sh.ctx.host.accounts.concat(mpeStaff(sh.w)), true).map(function (x) { return [x[0].toUpperCase(), String(x[1]).toUpperCase(), x[2]]; });
     var seen = {};
     var rows = users.filter(function (u) {
         var p = u[0].split('.');
@@ -610,6 +657,64 @@ function mpeListUser(sh, a) {
             'LOGON CNT : ' + (1 + hash32(u[0]) % 9) + '               CAP: ' + (u[2] ? 'SM,AM,AL,GL,ND,SF,BA,IA,PH' : 'ND,SF,BA,IA');
     }).join('\n') + '\n');
     gotLoot(sh.ctx, sh.io, 'the account report');
+}
+
+//  NEWUSER user[.acct];PASS=pw;CAP=SM,...: a new user in an account, as an
+//  account or system manager may add one
+function mpeNewUser(sh, a) {
+    if (!sh.priv) {
+        sh.out('LACKING SM OR AM CAPABILITY.  (CIERR 3010)\n');
+        return;
+    }
+    var name = (a.split(';')[0] || '').trim().toUpperCase();
+    if (!/^[A-Z][A-Z0-9]{0,7}(\.[A-Z][A-Z0-9]{0,7})?$/.test(name)) {
+        sh.out(name ? 'INVALID USER NAME.  (CIERR 1426)\n' : 'MISSING USER NAME.  (CIERR 3060)\n');
+        return;
+    }
+    if (name.indexOf('.') < 0) name += '.' + sh.acct;
+    if (!fsLook(sh.fs, '/', '/' + name.split('.')[1], { root: true }).node) {
+        sh.out('NON-EXISTENT ACCOUNT. (CIERR 1437)\n');
+        return;
+    }
+    var all = keepAccounts(sh.ctx, sh.ctx.host.accounts.concat(mpeStaff(sh.w)), true);
+    if (all.some(function (x) { return x[0].toUpperCase() === name; })) {
+        sh.out('DUPLICATE USER NAME.  (CIERR 3061)\n');
+        return;
+    }
+    var p = mpeParms(a);
+    keepAddAccount(sh.ctx, name, (p.PASS || '').toUpperCase(), /SM/.test((p.CAP || '').toUpperCase()));
+    mpeAudit(sh, 'NEWUSER ' + name + (p.CAP ? ';CAP=' + p.CAP.toUpperCase() : ''));
+}
+
+//  ALTUSER user[.acct];PASS=pw: a new password. MANAGER.SYS's takes the box.
+function mpeAltUser(sh, a) {
+    if (!sh.priv) {
+        sh.out('LACKING SM OR AM CAPABILITY.  (CIERR 3010)\n');
+        return;
+    }
+    var name = (a.split(';')[0] || '').trim().toUpperCase();
+    if (name && name.indexOf('.') < 0) name += '.' + sh.acct;
+    var all = keepAccounts(sh.ctx, sh.ctx.host.accounts.concat(mpeStaff(sh.w)), true);
+    var had = all.filter(function (x) { return x[0].toUpperCase() === name; })[0];
+    if (!had && name !== 'MANAGER.SYS') {
+        sh.out('NONEXISTENT USER.  (CIERR 1433)\n');
+        return;
+    }
+    var p = mpeParms(a);
+    if (p.PASS === undefined) return;
+    var pw = p.PASS.toUpperCase();
+    if (sh.ctx.ov.acc[name]) {
+        keepAddAccount(sh.ctx, name, pw, sh.ctx.ov.acc[name][1]);
+    } else if (mpePrivAccount(sh, name)) {
+        keepSetPassword(sh.ctx, name, pw);
+        sh.io.say('The ' + name + ' password is yours now. Anyone holding the old one is locked out. Careful what you leave behind.');
+    } else {
+        //  the ordinary users' passwords stay as they were: the ways in
+        //  are everyone's
+        sh.out('PASSWORD NOT CHANGED: USER IS LOGGED ON.  (CIWARN 3072)\n');
+        return;
+    }
+    mpeAudit(sh, 'ALTUSER ' + name + ';PASS=');
 }
 
 function mpeFcopy(sh) {

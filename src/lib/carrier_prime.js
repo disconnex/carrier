@@ -178,6 +178,9 @@ function primeTree(ctx) {
             }
         };
     }
+    //  EDIT_PROFILE's log of changes to the user list (no random draws:
+    //  it comes last, so the rest of the tree stays as it was)
+    put('/SAD/EDIT_PROFILE.LOG', primeFile('SYSTEM', 'SYSTEM', 'rw-------', '', 40));
     return { root: root, home: '/', w: w };
 }
 
@@ -186,7 +189,8 @@ function primeMoveIn(fs, user, priv) {
     var w = fs.w;
     var home = '/' + user;
     fs.home = home;
-    if (!fsLook(fs, '/', home, { root: true }).node) {
+    var had = fsLook(fs, '/', home, { root: true }).node;
+    if (!had || !had.dir) {
         var d = fsPut(fs.root, home, fsDir(user, priv ? 'SYSTEM' : 'USERS', 'rwxr-x---', primeDate(90)));
         d.kids['LOGIN.CPL'] = primeFile(user, d.grp, 'rw-r-----', '/* login\nTERM -ERASE ^H\n', 90);
     }
@@ -275,6 +279,7 @@ function primeWrite(sh, cmd, p, text) {
     delete f.size;
     f.mt = primeDate(0, function () { return 0.5; });
     if (!look.node) look.parent.kids[look.name] = f;
+    keepMark(sh.fs, look.path);
     return f;
 }
 
@@ -305,6 +310,7 @@ var PRIME_QUIET = ['ATTACH', 'WHERE', 'LD', 'DATE', 'HELP', 'STATUS', 'LIST_ACCE
 
 function runPrime(ctx, io, preAuth) {
     var h = ctx.host;
+    ctx.ov = keepLoad(ctx.seed, h.num);
     var t = era();
     io.out('\r\nPRIMENET ' + h.version + ' ' + h.name + '\r\n');
     var user = preAuth ? preAuth[0] : null;
@@ -325,7 +331,7 @@ function runPrime(ctx, io, preAuth) {
     var pw = io.line(false);
     if (pw === null) return;
     io.out('\r\n');
-    var acct = findAccount(h, user, pw, true);
+    var acct = findAccount({ accounts: keepAccounts(ctx, h.accounts, true) }, user, pw, true);
     if (!acct) {
         io.out('Invalid user id or password; please try again.\r\n');
         failedLogin(ctx);
@@ -338,11 +344,21 @@ function runPrime(ctx, io, preAuth) {
     io.out('Last login ' + t.prime.split('  ')[0] + '  08:41:02.\r\n\r\n');
     var priv = loggedIn(ctx, acct, io);
     var fs = primeTree(ctx);
+    keepOpen(ctx, fs, function () { return primeTree(ctx); });
     primeMoveIn(fs, name, priv);
     var sh = { ctx: ctx, io: io, fs: fs, w: fs.w, user: name, num: num, acct: acct, priv: priv, cwd: fs.home, ok: true };
     sh.who = { user: name, groups: [priv ? 'SYSTEM' : fs.w.staff.indexOf(name) >= 0 ? 'STAFF' : 'USERS'], root: !!priv };
     sh.out = function (s) { io.out(unixLines(s)); };
     sh.err = function (s) { sh.out(s + '\n'); sh.ok = false; };
+    sh.tty = 'asr' + (1 + v3.util.random(3));
+    sh.on = keepOn(ctx, name, sh.tty);
+    primeShell(sh);
+    keepOff(ctx, sh.on);
+}
+
+function primeShell(sh) {
+    var ctx = sh.ctx;
+    var io = sh.io;
     for (;;) {
         io.out(sh.ok ? 'OK, ' : 'ER! ');
         sh.ok = true;
@@ -365,8 +381,23 @@ function runPrime(ctx, io, preAuth) {
             sh.after = null;
             after.forEach(function (f) { f(ctx, io); });
         }
+        if (keepSave(sh.fs) === 'full') {
+            sh.err('Disk full. (std$cp)');
+            io.say('This Prime has no room for more of what players leave. What you just did lasts only this call.');
+        }
         if (res === 'exit' || io.over) return;
     }
+}
+
+//  A line in EDIT_PROFILE's log: what changed in the user list, and who
+//  did it
+function primeAudit(sh, what) {
+    keepLog(sh.fs, '/SAD/EDIT_PROFILE.LOG', [era().prime.split('  ')[0] + '  ' + sh.user + '  ' + what], 40);
+}
+
+//  Whether name is a privileged account the host came with
+function primePrivAccount(sh, name) {
+    return name === 'SYSTEM' || sh.ctx.host.accounts.some(function (a) { return a[0].toUpperCase() === name && a[2]; });
 }
 
 var PRIME_HELP = {
@@ -492,6 +523,7 @@ var PRIME_CMDS = {
             mode.splice(at, 3, bits.charAt(0), bits.charAt(1), bits.charAt(2));
         });
         f.node.mode = mode.join('');
+        keepMark(sh.fs, f.path);
     },
     STATUS: function (sh, a) {
         var what = (a[0] || 'ME').toUpperCase();
@@ -499,7 +531,7 @@ var PRIME_CMDS = {
         if (/^US/.test(what)) {
             var out = '\nUser          No  Line  Devices\n';
             if (adminOnline(sh.ctx)) out += fit('SYSTEM', 14) + fit('1', 4) + fit('asr', 6) + '<' + sh.w.vol + '>\n';
-            sh.w.staff.slice(1, 1 + Math.min(4, h.users)).concat([sh.user]).forEach(function (n, i) {
+            sh.w.staff.slice(1, 1 + Math.min(4, h.users)).concat(keepOthersOn(sh.ctx.seed, h.num).map(function (x) { return x.u; }), [sh.user]).forEach(function (n, i) {
                 out += fit(n, 14) + fit(String(n === sh.user ? sh.num : 30 + i), 4) + fit(String(i * 3), 6) + '<' + sh.w.vol + '>\n';
             });
             sh.out(out + '\n');
@@ -543,6 +575,7 @@ var PRIME_CMDS = {
             return;
         }
         delete f.look.parent.kids[f.look.name];
+        keepMark(sh.fs, f.path);
     },
     CREATE: function (sh, a) {
         if (!a.length) {
@@ -557,6 +590,7 @@ var PRIME_CMDS = {
             sh.err((look.err === 'missing' ? 'Not found. ' : 'Insufficient access rights. ') + a[0].toUpperCase() + ' (CREATE)');
         } else {
             look.parent.kids[look.name] = fsDir(sh.who.user, sh.who.groups[0], 'rwxr-x---', primeDate(0, function () { return 0.5; }));
+            keepMark(sh.fs, look.path);
         }
     },
     ED: function (sh, a) { return primeEd(sh, a[0]); },
@@ -569,7 +603,17 @@ var PRIME_CMDS = {
         var n = sh.io.line(false);
         if (n === null) return 'exit';
         sh.out('\n');
-        if (String(o).toUpperCase() !== String(sh.acct[1]).toUpperCase()) sh.err('Invalid password. (CHANGE_PASSWORD)');
+        if (String(o).toUpperCase() !== String(sh.acct[1]).toUpperCase()) {
+            sh.err('Invalid password. (CHANGE_PASSWORD)');
+        } else if (n && sh.ctx.ov.acc[sh.user]) {
+            keepAddAccount(sh.ctx, sh.user, n, sh.ctx.ov.acc[sh.user][1]);
+            primeAudit(sh, 'CHANGE_PASSWORD ' + sh.user);
+        } else if (n && primePrivAccount(sh, sh.user)) {
+            //  the system administrator's password: the box is the caller's
+            keepSetPassword(sh.ctx, sh.user, n);
+            primeAudit(sh, 'CHANGE_PASSWORD ' + sh.user);
+            sh.io.say('The ' + sh.user + ' password is yours now. Anyone holding the old one is locked out. Careful what you leave behind.');
+        }
     },
     MESSAGE: function (sh, a, line) {
         var to = (a[0] || '').toUpperCase();
@@ -674,7 +718,8 @@ function primeProfile(sh) {
     }
     var w = sh.w;
     sh.out('\n[EDIT_PROFILE Rev. ' + w.h.version + ' Copyright (c) 1990, Prime Computer, Inc.]\n\n');
-    var users = ['SYSTEM', 'PRIMENET', 'NETMAN'].concat(sh.ctx.host.accounts.map(function (a) { return a[0].toUpperCase(); }), w.staff)
+    var added = sh.ctx.ov.acc;
+    var users = ['SYSTEM', 'PRIMENET', 'NETMAN'].concat(sh.ctx.host.accounts.map(function (a) { return a[0].toUpperCase(); }), w.staff, Object.keys(added))
         .filter(function (u, i, all) { return all.indexOf(u) === i; });
     for (;;) {
         sh.io.out(': ');
@@ -686,7 +731,7 @@ function primeProfile(sh) {
             sh.out('\n' + users.map(function (u) {
                 var ac = sh.ctx.host.accounts.filter(function (a) { return a[0].toUpperCase() === u; })[0];
                 var real = w.real[u] || (u === 'SYSTEM' || (ac && ac[2] && u !== 'NETMAN') ? 'System administrator' : u === 'PRIMENET' || u === 'NETMAN' ? 'Network' : 'Guest');
-                return fit(u, 16) + fit(real, 26) + ((ac && ac[2]) || u === 'SYSTEM' || u === w.boss ? 'SAD' : 'DEFAULT$');
+                return fit(u, 16) + fit(added[u] ? '' : real, 26) + ((ac && ac[2]) || u === 'SYSTEM' || u === w.boss || (added[u] && added[u][1]) ? 'SAD' : 'DEFAULT$');
             }).join('\n') + '\n\n');
             gotLoot(sh.ctx, sh.io, 'the system administration directory');
         } else if (/^(AU|ADD_USER)$/.test(c[0])) {
@@ -699,11 +744,19 @@ function primeProfile(sh) {
             if (users.indexOf(c[1]) >= 0) {
                 sh.out('User ' + c[1] + ' already exists.\n');
             } else if (c[1]) {
+                //  ADD_USER name [-SAD]: a password, and the SAD group if asked
+                sh.out('Password? ');
+                var npw = sh.io.line(false);
+                if (npw === null) return 'exit';
+                sh.out('\n');
+                var sad = c.indexOf('-SAD') >= 0;
                 users.push(c[1]);
-                sh.out('User ' + c[1] + ' added.\n');
+                keepAddAccount(sh.ctx, c[1], npw, sad);
+                primeAudit(sh, 'ADD_USER ' + c[1] + (sad ? ' -SAD' : ''));
+                sh.out('User ' + c[1] + ' added' + (sad ? ' to SAD' : '') + '.\n');
             }
         } else if (/^(HELP|H|\?)$/.test(c[0])) {
-            sh.out('LIST_USER (LU)   ADD_USER (AU)   QUIT (Q)\n');
+            sh.out('LIST_USER (LU)   ADD_USER (AU) user [-SAD]   QUIT (Q)\n');
         } else {
             sh.out('Unknown command ' + c[0] + '.\n');
         }

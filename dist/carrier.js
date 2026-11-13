@@ -1280,9 +1280,15 @@ function finishCracks(p, seed) {
         var r = rng(hash32(seed + '|crack|' + j.num));
         var users = someUsersFor(j.num, 5);
         var accts = [[users[1], pick(r, CRACK_WORDS), false], [users[3], pick(r, CRACK_WORDS), false]];
-        //  a root password a player set falls to the wordlist if it's weak
-        var rootNow = keepLoad(seed, j.num).pw.root;
-        if (rootNow !== undefined && crackWeak(rootNow, users)) accts.push(['root', rootNow, true]);
+        //  a password a player set (root's, SYSTEM's) or an account a
+        //  player added falls to the wordlist if it's weak
+        var ov = keepLoad(seed, j.num);
+        Object.keys(ov.pw).forEach(function (u) {
+            if (crackWeak(ov.pw[u], users)) accts.push([u, ov.pw[u], true]);
+        });
+        Object.keys(ov.acc).forEach(function (u) {
+            if (crackWeak(ov.acc[u][0], users)) accts.push([u, ov.acc[u][0], !!ov.acc[u][1]]);
+        });
         p.cracked = p.cracked || {};
         p.cracked[j.num] = accts;
         p.crackedAt = p.crackedAt || {};
@@ -1314,11 +1320,12 @@ function crackWeak(pw, users) {
         /^[a-z]{1,6}$/.test(pw);
 }
 
-//  Whether root's password on num was changed after the player last ran
-//  Crack there, so another run is worth it
+//  Whether a password on num was set after the player last ran Crack
+//  there, so another run is worth it
 function crackStale(p, seed, num) {
-    var by = keepLoad(seed, num).pwBy.root;
-    return !!by && by[2] > ((p.crackedAt || {})[num] || 0);
+    var by = keepLoad(seed, num).pwBy;
+    var at = (p.crackedAt || {})[num] || 0;
+    return Object.keys(by).some(function (u) { return by[u][2] > at; });
 }
 
 //  The made-up users of a host (as carrier_hosts.js someUsers names them)
@@ -2127,7 +2134,9 @@ function fsPattern(pat) {
 //  In v3.data, per season seed:
 //    k.<seed>.<num>   the host's changes: { p: { path: entry },
 //                     by: { path: [uid, handle, ms] }, pw: { user: password },
-//                     pwBy: { user: [uid, handle, ms] } }
+//                     pwBy: { user: [uid, handle, ms] },
+//                     acc: { USER: [password, privileged] } (accounts players
+//                     added: AUTHORIZE, EDIT_PROFILE, NEWUSER) }
 //    km.<seed>.<num>  mail players sent there: [{ to, from, subj, body, at }]
 //    ko.<seed>.<num>  who was on lately: [{ u, id, tty, on, off }]
 //    kp.<seed>.<uid>  a player's changes, oldest first: [[num, path, ms]]
@@ -2164,11 +2173,12 @@ function keepLoad(seed, num) {
     ov.by = ov.by || {};
     ov.pw = ov.pw || {};
     ov.pwBy = ov.pwBy || {};
+    ov.acc = ov.acc || {};
     return ov;
 }
 
 function keepStore(seed, num, ov) {
-    if (!Object.keys(ov.p).length && !Object.keys(ov.pw).length) {
+    if (!Object.keys(ov.p).length && !Object.keys(ov.pw).length && !Object.keys(ov.acc).length) {
         v3.data.delete(keepKey(seed, num));
         return;
     }
@@ -2213,6 +2223,10 @@ function keepApply(fs, ov) {
                 node.onRead = was.onRead;
                 node.repeat = was.repeat;
                 node.dev = was.dev;
+                //  an MPE system log stays a log; a VMS file keeps its version
+                node.log = was.log;
+                node.code = was.code;
+                node.ver = was.ver;
             }
         }
         fsPut(fs.root, path, node);
@@ -2352,6 +2366,50 @@ function keepSetPassword(ctx, user, pw) {
     ov.pw[user] = pw;
     ov.pwBy[user] = [String(v3.user.id), ctx.p.h, nowMs()];
     keepStore(ctx.seed, ctx.host.num, ov);
+    if (ctx.ov) ctx.ov.pw[user] = pw;
+}
+
+//  A host's accounts as they are now: passwords players set put in, and
+//  the accounts players added. fold: names don't care about case (VMS,
+//  PRIMOS, MPE), and are kept upper case.
+function keepAccounts(ctx, list, fold) {
+    var ov = ctx.ov || keepLoad(ctx.seed, ctx.host.num);
+    var norm = function (n) { return fold ? String(n).toUpperCase() : String(n); };
+    var out = list.map(function (a) {
+        var pw = ov.pw[norm(a[0])];
+        return pw !== undefined ? [a[0], pw, a[2]] : a;
+    });
+    Object.keys(ov.acc).forEach(function (n) {
+        out = out.filter(function (a) { return norm(a[0]) !== n; });
+        out.push([n, ov.acc[n][0], !!ov.acc[n][1]]);
+    });
+    return out;
+}
+
+//  Adds an account to the host, or changes the password of one a player
+//  added
+function keepAddAccount(ctx, name, pw, priv) {
+    var ov = keepLoad(ctx.seed, ctx.host.num);
+    var prev = ov.pwBy[name];
+    if (ov.acc[name] && prev && prev[0] !== String(v3.user.id)) {
+        keepNotice(prev[0], 'The ' + name + ' account you left on ' + ctx.host.name + ' has been changed.');
+    }
+    ov.acc[name] = [pw, !!priv];
+    ov.pwBy[name] = [String(v3.user.id), ctx.p.h, nowMs()];
+    keepStore(ctx.seed, ctx.host.num, ov);
+    if (ctx.ov) ctx.ov.acc[name] = [pw, !!priv];
+}
+
+//  Adds lines to the end of a log file the system keeps (sulog, OPERATOR.LOG),
+//  keeping the last max of them, and marks it to be kept
+function keepLog(fs, path, lines, max) {
+    var look = fsLook(fs, '/', path, { root: true });
+    if (!look.node || look.node.dir) return;
+    var have = fsText(look.node).split('\n').filter(function (l) { return l; });
+    look.node.text = have.concat(lines).slice(-(max || 40)).join('\n') + '\n';
+    look.node.type = 'text';
+    delete look.node.size;
+    keepMark(fs, look.path);
 }
 
 //  ---- who was on ----
@@ -4368,7 +4426,8 @@ function vmsMoveIn(fs, user, priv) {
     var home = VMS_HOMES[user] || '/' + user;
     fs.home = home;
     var look = fsLook(fs, '/', home, { root: true });
-    if (!look.node) {
+    //  none, or a player left a file where it was
+    if (!look.node || !look.node.dir) {
         var d = fsPut(fs.root, home, fsDir(user, priv ? 'SYSTEM' : 'USERS', 'rwxr-x---', vmsDate(90)));
         d.kids['LOGIN.COM'] = vmsFile(user, d.grp, 'rw-r-----', '$ SET TERMINAL/INQUIRE\n$ SET PROMPT="$ "\n', 90);
     }
@@ -4610,6 +4669,7 @@ function vmsWrite(sh, fac, sp, text) {
     f.ver = had ? (had.ver || 1) + 1 : 1;
     f.mt = vmsDate(0, function () { return 0.5; });
     d.node.kids[key] = f;
+    keepMark(sh.fs, sp.dir + '/' + key);
     return f;
 }
 
@@ -4668,6 +4728,7 @@ var VMS_QUIET = ['DIRECTORY', 'HELP', 'SHOW'];
 
 function runVMS(ctx, io) {
     var h = ctx.host;
+    ctx.ov = keepLoad(ctx.seed, h.num);
     var t = era();
     io.out('\r\n\r\n\r\n                 Welcome to VAX/VMS ' + h.version + '  on node ' + h.name + '\r\n');
     io.out('        ' + h.org + '  --  UNAUTHORIZED ACCESS PROHIBITED\r\n\r\n');
@@ -4681,7 +4742,7 @@ function runVMS(ctx, io) {
         var pw = io.line(false);
         if (pw === null) return;
         io.out('\r\n');
-        acct = findAccount(h, u.trim(), pw, true);
+        acct = findAccount({ accounts: keepAccounts(ctx, h.accounts, true) }, u.trim(), pw, true);
         if (!acct) {
             io.out('User authorization failure\r\n\r\n');
             failedLogin(ctx);
@@ -4692,6 +4753,7 @@ function runVMS(ctx, io) {
         return;
     }
     var fs = vmsTree(ctx);
+    keepOpen(ctx, fs, function () { return vmsTree(ctx); });
     var w = fs.w;
     var user = acct[0].toUpperCase();
     var priv = loggedIn(ctx, acct, io);
@@ -4700,11 +4762,22 @@ function runVMS(ctx, io) {
     sh.who = { user: user, groups: [priv ? 'SYSTEM' : w.staff.indexOf(user) >= 0 ? 'STAFF' : 'USERS'], root: !!priv };
     sh.out = function (s) { io.out(unixLines(s)); };
     var box = fsLook(fs, '/', fs.home + '/MAIL.MAI', { root: true }).node;
-    box.msgs = vmsMyMail(w, user, ctx);
+    box.msgs = vmsMyMail(w, user, ctx).concat(keepMail(ctx.seed, h.num).filter(function (m) { return m.to === user; }).map(function (m) {
+        return vmsMsg(w.name + '::' + m.from, m.to, m.subj, m.body, 0);
+    }));
     box.newMail = box.msgs.length;
     io.out('\r\n        Welcome to VAX/VMS version ' + h.version + ' on node ' + h.name + '\r\n');
     io.out('    Last interactive login on ' + t.day + ', ' + t.vms.slice(0, 11) + ' 09:14\r\n');
     io.out('\r\n    You have ' + box.newMail + ' new Mail messages.\r\n\r\n');
+    sh.tty = 'TTA' + (1 + v3.util.random(3)) + ':';
+    sh.on = keepOn(ctx, user, sh.tty);
+    vmsShell(sh);
+    keepOff(ctx, sh.on);
+}
+
+function vmsShell(sh) {
+    var ctx = sh.ctx;
+    var io = sh.io;
     for (;;) {
         io.out(sh.prompt);
         var cmd = io.line(true);
@@ -4713,8 +4786,29 @@ function runVMS(ctx, io) {
         if (!c) continue;
         var verb = c.charAt(0) === '@' ? '@' : vmsVerb(c.split(/[\s\/]/)[0], VMS_VERBS);
         if (verb !== 'PHONE' && verb !== 'LOGOUT' && watched(ctx, io, VMS_QUIET.indexOf(verb) >= 0 ? 0.3 : 1)) return;
-        if (vmsRun(sh, c, verb) === 'exit' || io.over) return;
+        var res = vmsRun(sh, c, verb);
+        if (keepSave(sh.fs) === 'full') {
+            sh.out('%RMS-F-FUL, device full (insufficient space for allocation)\n');
+            io.say('This VAX has no room for more of what players leave. What you just did lasts only this call.');
+        }
+        if (res === 'exit' || io.over) return;
     }
+}
+
+//  An audit entry in OPERATOR.LOG: what was done to SYSUAF, and from which
+//  account. Whoever reads the log later sees it.
+function vmsAudit(sh, event, lines) {
+    var t = era().vms;
+    keepLog(sh.fs, '/SYS0/SYSMGR/OPERATOR.LOG', ['%%%%%%%%%%%  OPCOM  ' + t + '  %%%%%%%%%%%', 'Message from user AUDIT$SERVER on ' + sh.w.name,
+        'Security alarm (SECURITY) and security audit (SECURITY) on ' + sh.w.name + ', system id: 1124',
+        'Auditable event:          ' + event, 'Event time:               ' + t, 'Username:                 ' + sh.user,
+        'Terminal name:            ' + (sh.tty || 'TTA1:')].concat(lines), 80);
+}
+
+//  Whether name is a privileged account the host came with: changing its
+//  password takes the box
+function vmsPrivAccount(sh, name) {
+    return name === 'SYSTEM' || sh.ctx.host.accounts.some(function (a) { return a[0].toUpperCase() === name && a[2]; });
 }
 
 //  Runs one command line. Returns 'exit' to end the session.
@@ -4967,6 +5061,7 @@ var VMS_CMDS = {
             }
             if (!up.node.kids[name]) {
                 up.node.kids[name] = fsDir(sh.who.user, sh.who.groups[0], 'rwxr-x---', vmsDate(0, function () { return 0.5; }));
+                keepMark(sh.fs, sp.dir);
                 if (vmsQ(q, 'LOG')) sh.out('%CREATE-I-CREATED, ' + vmsDirSpec(sp.dir) + ' created\n');
             }
             return;
@@ -5014,6 +5109,7 @@ var VMS_CMDS = {
                     return;
                 }
                 delete list.dir.kids[x[0]];
+                keepMark(sh.fs, sp.dir + '/' + x[0]);
                 if (vmsQ(q, 'LOG')) sh.out('%DELETE-I-FILDEL, ' + show + ' deleted (' + Math.max(1, Math.ceil(fsSize(x[1]) / 512)) + ' blocks)\n');
                 if (sp.dir === '/SYS0/SYSMGR' && x[0] === 'ACCOUNTNG.DAT') cleaned(sh.ctx, sh.io);
             });
@@ -5101,6 +5197,8 @@ function vmsCopy(sh, a, q, move) {
         }
         delete list.dir.kids[src[0]];
         to.node.kids[src[1].dir ? dp.name : dp.name + '.' + dp.type] = src[1];
+        keepMark(sh.fs, sp.dir + '/' + src[0]);
+        keepMark(sh.fs, dp.dir + '/' + (src[1].dir ? dp.name : dp.name + '.' + dp.type));
         if (vmsQ(q, 'LOG')) sh.out('%RENAME-I-RENAMED, ' + vmsDirSpec(sp.dir) + vmsName(src[0], src[1]) + ' renamed to ' + vmsDirSpec(dp.dir) + dp.name + '.' + dp.type + ';' + (src[1].ver || 1) + '\n');
         return;
     }
@@ -5151,7 +5249,12 @@ function vmsUAF(sh) {
     w.staff.forEach(function (n, i) {
         if (!rows.some(function (x) { return x[0] === n; })) rows.push([n, w.real[n].toUpperCase(), 'STAFF', '100,' + (1 + i), n === w.boss ? 'All' : 'Normal', '/' + n]);
     });
-    (sh.added || []).forEach(function (x) { rows.push(x); });
+    //  accounts players added
+    Object.keys(sh.ctx.ov.acc).forEach(function (n) {
+        if (!rows.some(function (x) { return x[0] === n; })) {
+            rows.push([n, n, 'USERS', '200,' + (50 + rows.length), sh.ctx.ov.acc[n][1] ? 'All' : 'Normal', '/' + n]);
+        }
+    });
     return rows;
 }
 
@@ -5210,18 +5313,41 @@ function vmsAuthorize(sh) {
             } else if (rows.some(function (x) { return x[0] === nu; })) {
                 sh.out('%UAF-W-UAEERR, invalid user name, user name already exists\n');
             } else {
-                sh.added = (sh.added || []).concat([[nu, nu, 'USERS', '200,' + (50 + rows.length), /ALL/i.test(String(vmsQ(p.q, 'PRIVILEGES') || '')) ? 'All' : 'Normal', '/' + nu]]);
+                //  AUTHORIZE's default password was USER
+                var npw = vmsQ(p.q, 'PASSWORD');
+                npw = npw && npw !== true ? String(npw) : 'USER';
+                var npriv = /ALL|SETPRV|CMKRNL|SYSPRV/i.test(String(vmsQ(p.q, 'PRIVILEGES') || ''));
+                keepAddAccount(sh.ctx, nu, npw, npriv);
+                vmsAudit(sh, 'System UAF record addition', ['Image name:               SYS$SYSTEM:AUTHORIZE.EXE', 'User record added:        ' + nu]);
                 sh.out('%UAF-I-ADDMSG, user record successfully added\n%UAF-I-RDBADDMSGU, identifier ' + nu + ' value [000200,0000' + (50 + rows.length) + '] added to rights data base\n');
             }
         } else if (v === 'MODIFY') {
             var mu = (p.words[1] || '').toUpperCase();
-            sh.out(rows.some(function (x) { return x[0] === mu; }) ? '%UAF-I-MDFYMSG, user record(s) updated\n' : '%UAF-W-BADUSR, username does not exist\n');
+            var mpw = vmsQ(p.q, 'PASSWORD');
+            if (!rows.some(function (x) { return x[0] === mu; })) {
+                sh.out('%UAF-W-BADUSR, username does not exist\n');
+            } else {
+                if (mpw && mpw !== true && (vmsPrivAccount(sh, mu) || sh.ctx.ov.acc[mu])) vmsSetPassword(sh, mu, String(mpw));
+                sh.out('%UAF-I-MDFYMSG, user record(s) updated\n');
+            }
         } else if (v === 'HELP') {
             sh.out('\n  ADD  EXIT  HELP  LIST  MODIFY  SHOW\n\n');
         } else {
             sh.out('%UAF-W-ISSPARSE, unrecognized command verb\n \\' + (p.words[0] || '').toUpperCase() + '\\\n');
         }
     }
+}
+
+//  A new password for name, kept: the system manager's takes the box
+function vmsSetPassword(sh, name, pw) {
+    if (sh.ctx.ov.acc[name]) {
+        keepAddAccount(sh.ctx, name, pw, sh.ctx.ov.acc[name][1]);
+    } else {
+        keepSetPassword(sh.ctx, name, pw);
+        sh.io.say('The ' + name + ' password is yours now. Anyone holding the old one is locked out. Careful what you leave behind.');
+    }
+    vmsAudit(sh, 'System UAF record modification', ['Image name:               SYS$SYSTEM:AUTHORIZE.EXE', 'User record modified:     ' + name,
+        'Fields modified:          PASSWORD']);
 }
 
 function vmsSet(sh, a, q, line) {
@@ -5272,6 +5398,7 @@ function vmsSet(sh, a, q, line) {
                     mode[at + 2] = /E/.test(kv[2]) ? 'x' : '-';
                 });
                 x[1].mode = mode.join('');
+                keepMark(sh.fs, sp2.dir + '/' + x[0]);
             });
         });
         return;
@@ -5292,6 +5419,10 @@ function vmsSet(sh, a, q, line) {
             sh.out('%SET-F-PWDNOTVER, new password not verified\n');
         } else if (nw.length < 6) {
             sh.out('%SET-F-INVPWDLEN, invalid password length - password not changed\n');
+        } else if (vmsPrivAccount(sh, sh.user) || sh.ctx.ov.acc[sh.user]) {
+            //  the system manager's password, or one a player added: it's
+            //  the caller's now
+            vmsSetPassword(sh, sh.user, nw);
         }
         return;
     case 'PROMPT':
@@ -5346,7 +5477,7 @@ function vmsShow(sh, a, q) {
         var out = '      VAX/VMS User Processes at ' + t.vms + '\n    Total number of users = ' + (h.users + 1) + ',  number of processes = ' + (h.users + 6) + '\n\n' +
             ' Username     Interactive  Subprocess   Batch\n';
         if (adminOnline(sh.ctx)) out += ' SYSTEM              1           1\n';
-        sh.w.staff.slice(1, 1 + Math.min(4, h.users)).concat([sh.user]).forEach(function (n) {
+        sh.w.staff.slice(1, 1 + Math.min(4, h.users)).concat(keepOthersOn(sh.ctx.seed, h.num).map(function (x) { return x.u; }), [sh.user]).forEach(function (n) {
             out += ' ' + fit(n, 12) + '        1\n';
         });
         sh.out(out);
@@ -5476,13 +5607,19 @@ function vmsMail(sh, a) {
             var body = vmsLines(sh);
             if (body === null) return 'exit';
             var name = String(to).toUpperCase().replace(/^.*::/, '');
-            if (sh.w.staff.indexOf(name) < 0 && name !== 'SYSTEM' && name !== sh.user) {
+            var known = sh.w.staff.indexOf(name) >= 0 || name === 'SYSTEM' || name === sh.user || !!sh.ctx.ov.acc[name] ||
+                sh.ctx.host.accounts.some(function (x) { return x[0].toUpperCase() === name; }) ||
+                keepSeen(sh.ctx.seed, sh.w.h.num).some(function (x) { return x.u === name; });
+            if (!known) {
                 sh.out('%MAIL-E-NOSUCHUSR, no such user ' + name + '\n');
                 continue;
             }
             if (name === sh.w.boss || name === 'SYSTEM') addHeat(sh.ctx.p, 2);
             if (name === sh.user) {
                 msgs.push(vmsMsg(sh.w.name + '::' + sh.user, sh.user, subj, body.join('\n'), 0));
+            } else if (name !== sh.w.boss && name !== 'SYSTEM') {
+                //  it waits there for whoever logs in as them, players included
+                keepSendMail(sh.ctx, name, sh.user, String(subj).slice(0, 60), body.join('\n').slice(0, 1000));
             }
         } else if (v === 'EXTRACT') {
             if (cur < 0) {
@@ -5741,6 +5878,9 @@ function primeTree(ctx) {
             }
         };
     }
+    //  EDIT_PROFILE's log of changes to the user list (no random draws:
+    //  it comes last, so the rest of the tree stays as it was)
+    put('/SAD/EDIT_PROFILE.LOG', primeFile('SYSTEM', 'SYSTEM', 'rw-------', '', 40));
     return { root: root, home: '/', w: w };
 }
 
@@ -5749,7 +5889,8 @@ function primeMoveIn(fs, user, priv) {
     var w = fs.w;
     var home = '/' + user;
     fs.home = home;
-    if (!fsLook(fs, '/', home, { root: true }).node) {
+    var had = fsLook(fs, '/', home, { root: true }).node;
+    if (!had || !had.dir) {
         var d = fsPut(fs.root, home, fsDir(user, priv ? 'SYSTEM' : 'USERS', 'rwxr-x---', primeDate(90)));
         d.kids['LOGIN.CPL'] = primeFile(user, d.grp, 'rw-r-----', '/* login\nTERM -ERASE ^H\n', 90);
     }
@@ -5838,6 +5979,7 @@ function primeWrite(sh, cmd, p, text) {
     delete f.size;
     f.mt = primeDate(0, function () { return 0.5; });
     if (!look.node) look.parent.kids[look.name] = f;
+    keepMark(sh.fs, look.path);
     return f;
 }
 
@@ -5868,6 +6010,7 @@ var PRIME_QUIET = ['ATTACH', 'WHERE', 'LD', 'DATE', 'HELP', 'STATUS', 'LIST_ACCE
 
 function runPrime(ctx, io, preAuth) {
     var h = ctx.host;
+    ctx.ov = keepLoad(ctx.seed, h.num);
     var t = era();
     io.out('\r\nPRIMENET ' + h.version + ' ' + h.name + '\r\n');
     var user = preAuth ? preAuth[0] : null;
@@ -5888,7 +6031,7 @@ function runPrime(ctx, io, preAuth) {
     var pw = io.line(false);
     if (pw === null) return;
     io.out('\r\n');
-    var acct = findAccount(h, user, pw, true);
+    var acct = findAccount({ accounts: keepAccounts(ctx, h.accounts, true) }, user, pw, true);
     if (!acct) {
         io.out('Invalid user id or password; please try again.\r\n');
         failedLogin(ctx);
@@ -5901,11 +6044,21 @@ function runPrime(ctx, io, preAuth) {
     io.out('Last login ' + t.prime.split('  ')[0] + '  08:41:02.\r\n\r\n');
     var priv = loggedIn(ctx, acct, io);
     var fs = primeTree(ctx);
+    keepOpen(ctx, fs, function () { return primeTree(ctx); });
     primeMoveIn(fs, name, priv);
     var sh = { ctx: ctx, io: io, fs: fs, w: fs.w, user: name, num: num, acct: acct, priv: priv, cwd: fs.home, ok: true };
     sh.who = { user: name, groups: [priv ? 'SYSTEM' : fs.w.staff.indexOf(name) >= 0 ? 'STAFF' : 'USERS'], root: !!priv };
     sh.out = function (s) { io.out(unixLines(s)); };
     sh.err = function (s) { sh.out(s + '\n'); sh.ok = false; };
+    sh.tty = 'asr' + (1 + v3.util.random(3));
+    sh.on = keepOn(ctx, name, sh.tty);
+    primeShell(sh);
+    keepOff(ctx, sh.on);
+}
+
+function primeShell(sh) {
+    var ctx = sh.ctx;
+    var io = sh.io;
     for (;;) {
         io.out(sh.ok ? 'OK, ' : 'ER! ');
         sh.ok = true;
@@ -5928,8 +6081,23 @@ function runPrime(ctx, io, preAuth) {
             sh.after = null;
             after.forEach(function (f) { f(ctx, io); });
         }
+        if (keepSave(sh.fs) === 'full') {
+            sh.err('Disk full. (std$cp)');
+            io.say('This Prime has no room for more of what players leave. What you just did lasts only this call.');
+        }
         if (res === 'exit' || io.over) return;
     }
+}
+
+//  A line in EDIT_PROFILE's log: what changed in the user list, and who
+//  did it
+function primeAudit(sh, what) {
+    keepLog(sh.fs, '/SAD/EDIT_PROFILE.LOG', [era().prime.split('  ')[0] + '  ' + sh.user + '  ' + what], 40);
+}
+
+//  Whether name is a privileged account the host came with
+function primePrivAccount(sh, name) {
+    return name === 'SYSTEM' || sh.ctx.host.accounts.some(function (a) { return a[0].toUpperCase() === name && a[2]; });
 }
 
 var PRIME_HELP = {
@@ -6055,6 +6223,7 @@ var PRIME_CMDS = {
             mode.splice(at, 3, bits.charAt(0), bits.charAt(1), bits.charAt(2));
         });
         f.node.mode = mode.join('');
+        keepMark(sh.fs, f.path);
     },
     STATUS: function (sh, a) {
         var what = (a[0] || 'ME').toUpperCase();
@@ -6062,7 +6231,7 @@ var PRIME_CMDS = {
         if (/^US/.test(what)) {
             var out = '\nUser          No  Line  Devices\n';
             if (adminOnline(sh.ctx)) out += fit('SYSTEM', 14) + fit('1', 4) + fit('asr', 6) + '<' + sh.w.vol + '>\n';
-            sh.w.staff.slice(1, 1 + Math.min(4, h.users)).concat([sh.user]).forEach(function (n, i) {
+            sh.w.staff.slice(1, 1 + Math.min(4, h.users)).concat(keepOthersOn(sh.ctx.seed, h.num).map(function (x) { return x.u; }), [sh.user]).forEach(function (n, i) {
                 out += fit(n, 14) + fit(String(n === sh.user ? sh.num : 30 + i), 4) + fit(String(i * 3), 6) + '<' + sh.w.vol + '>\n';
             });
             sh.out(out + '\n');
@@ -6106,6 +6275,7 @@ var PRIME_CMDS = {
             return;
         }
         delete f.look.parent.kids[f.look.name];
+        keepMark(sh.fs, f.path);
     },
     CREATE: function (sh, a) {
         if (!a.length) {
@@ -6120,6 +6290,7 @@ var PRIME_CMDS = {
             sh.err((look.err === 'missing' ? 'Not found. ' : 'Insufficient access rights. ') + a[0].toUpperCase() + ' (CREATE)');
         } else {
             look.parent.kids[look.name] = fsDir(sh.who.user, sh.who.groups[0], 'rwxr-x---', primeDate(0, function () { return 0.5; }));
+            keepMark(sh.fs, look.path);
         }
     },
     ED: function (sh, a) { return primeEd(sh, a[0]); },
@@ -6132,7 +6303,17 @@ var PRIME_CMDS = {
         var n = sh.io.line(false);
         if (n === null) return 'exit';
         sh.out('\n');
-        if (String(o).toUpperCase() !== String(sh.acct[1]).toUpperCase()) sh.err('Invalid password. (CHANGE_PASSWORD)');
+        if (String(o).toUpperCase() !== String(sh.acct[1]).toUpperCase()) {
+            sh.err('Invalid password. (CHANGE_PASSWORD)');
+        } else if (n && sh.ctx.ov.acc[sh.user]) {
+            keepAddAccount(sh.ctx, sh.user, n, sh.ctx.ov.acc[sh.user][1]);
+            primeAudit(sh, 'CHANGE_PASSWORD ' + sh.user);
+        } else if (n && primePrivAccount(sh, sh.user)) {
+            //  the system administrator's password: the box is the caller's
+            keepSetPassword(sh.ctx, sh.user, n);
+            primeAudit(sh, 'CHANGE_PASSWORD ' + sh.user);
+            sh.io.say('The ' + sh.user + ' password is yours now. Anyone holding the old one is locked out. Careful what you leave behind.');
+        }
     },
     MESSAGE: function (sh, a, line) {
         var to = (a[0] || '').toUpperCase();
@@ -6237,7 +6418,8 @@ function primeProfile(sh) {
     }
     var w = sh.w;
     sh.out('\n[EDIT_PROFILE Rev. ' + w.h.version + ' Copyright (c) 1990, Prime Computer, Inc.]\n\n');
-    var users = ['SYSTEM', 'PRIMENET', 'NETMAN'].concat(sh.ctx.host.accounts.map(function (a) { return a[0].toUpperCase(); }), w.staff)
+    var added = sh.ctx.ov.acc;
+    var users = ['SYSTEM', 'PRIMENET', 'NETMAN'].concat(sh.ctx.host.accounts.map(function (a) { return a[0].toUpperCase(); }), w.staff, Object.keys(added))
         .filter(function (u, i, all) { return all.indexOf(u) === i; });
     for (;;) {
         sh.io.out(': ');
@@ -6249,7 +6431,7 @@ function primeProfile(sh) {
             sh.out('\n' + users.map(function (u) {
                 var ac = sh.ctx.host.accounts.filter(function (a) { return a[0].toUpperCase() === u; })[0];
                 var real = w.real[u] || (u === 'SYSTEM' || (ac && ac[2] && u !== 'NETMAN') ? 'System administrator' : u === 'PRIMENET' || u === 'NETMAN' ? 'Network' : 'Guest');
-                return fit(u, 16) + fit(real, 26) + ((ac && ac[2]) || u === 'SYSTEM' || u === w.boss ? 'SAD' : 'DEFAULT$');
+                return fit(u, 16) + fit(added[u] ? '' : real, 26) + ((ac && ac[2]) || u === 'SYSTEM' || u === w.boss || (added[u] && added[u][1]) ? 'SAD' : 'DEFAULT$');
             }).join('\n') + '\n\n');
             gotLoot(sh.ctx, sh.io, 'the system administration directory');
         } else if (/^(AU|ADD_USER)$/.test(c[0])) {
@@ -6262,11 +6444,19 @@ function primeProfile(sh) {
             if (users.indexOf(c[1]) >= 0) {
                 sh.out('User ' + c[1] + ' already exists.\n');
             } else if (c[1]) {
+                //  ADD_USER name [-SAD]: a password, and the SAD group if asked
+                sh.out('Password? ');
+                var npw = sh.io.line(false);
+                if (npw === null) return 'exit';
+                sh.out('\n');
+                var sad = c.indexOf('-SAD') >= 0;
                 users.push(c[1]);
-                sh.out('User ' + c[1] + ' added.\n');
+                keepAddAccount(sh.ctx, c[1], npw, sad);
+                primeAudit(sh, 'ADD_USER ' + c[1] + (sad ? ' -SAD' : ''));
+                sh.out('User ' + c[1] + ' added' + (sad ? ' to SAD' : '') + '.\n');
             }
         } else if (/^(HELP|H|\?)$/.test(c[0])) {
-            sh.out('LIST_USER (LU)   ADD_USER (AU)   QUIT (Q)\n');
+            sh.out('LIST_USER (LU)   ADD_USER (AU) user [-SAD]   QUIT (Q)\n');
         } else {
             sh.out('Unknown command ' + c[0] + '.\n');
         }
@@ -6562,6 +6752,7 @@ function mpeWrite(sh, s, text) {
     delete f.size;
     f.mt = mpeDate(0);
     gl.node.kids[n.file] = f;
+    keepMark(sh.fs, '/' + n.acct + '/' + n.group + '/' + n.file);
     return f;
 }
 
@@ -6571,6 +6762,7 @@ var MPE_QUIET = ['LISTF', 'SHOWME', 'SHOWJOB', 'SHOWTIME', 'HELP', 'CHGROUP'];
 
 function runHP(ctx, io) {
     var h = ctx.host;
+    ctx.ov = keepLoad(ctx.seed, h.num);
     var t = era();
     io.out('\r\n:');
     var acct = null;
@@ -6585,7 +6777,7 @@ function runHP(ctx, io) {
         }
         var ua = m[1].toUpperCase();
         group = (m[5] || 'PUB').toUpperCase();
-        var all = h.accounts.concat(mpeStaff(mpeWorld(ctx)));
+        var all = keepAccounts(ctx, h.accounts.concat(mpeStaff(mpeWorld(ctx))), true);
         var match = all.filter(function (a) { return a[0] === ua; });
         if (!match.length) {
             var acctPart = ua.split('.')[1];
@@ -6618,6 +6810,7 @@ function runHP(ctx, io) {
         return;
     }
     var fs = mpeTree(ctx);
+    keepOpen(ctx, fs, function () { return mpeTree(ctx); });
     var w = fs.w;
     var who = acct[0].toUpperCase();
     var acctName = who.split('.')[1];
@@ -6631,6 +6824,15 @@ function runHP(ctx, io) {
     var sh = { ctx: ctx, io: io, fs: fs, w: w, user: who, acct: acctName, group: group, priv: priv, job: 100 + h.users, pw: acct[1] };
     sh.who = { user: who, groups: [acctName], root: !!priv };
     sh.out = function (s) { io.out(unixLines(s)); };
+    sh.tty = 'LDEV ' + (20 + v3.util.random(9));
+    sh.on = keepOn(ctx, who, sh.tty);
+    mpeShell(sh);
+    keepOff(ctx, sh.on);
+}
+
+function mpeShell(sh) {
+    var ctx = sh.ctx;
+    var io = sh.io;
     for (;;) {
         io.out(':');
         var cmd = io.line(true);
@@ -6651,8 +6853,35 @@ function runHP(ctx, io) {
             sh.after = null;
             after.forEach(function (f) { f(ctx, io); });
         }
+        if (keepSave(sh.fs) === 'full') {
+            sh.out('OUT OF DISC SPACE  (FSERR 46)\n');
+            io.say('This HP has no room for more of what players leave. What you just did lasts only this call.');
+        }
         if (res === 'exit' || io.over) return;
     }
+}
+
+//  An entry in the newest system log file: who changed the directory, and
+//  how. LISTLOG would show it; PURGE LOG@.PUB.SYS takes it away.
+function mpeAudit(sh, what) {
+    var logs = Object.keys(fsLook(sh.fs, '/', '/SYS/PUB', { root: true }).node.kids).filter(function (k) { return /^LOG\d{4}$/.test(k); }).sort();
+    if (!logs.length) return;
+    keepLog(sh.fs, '/SYS/PUB/' + logs[logs.length - 1], [era().hp + '  ' + sh.user + '  ' + what], 40);
+}
+
+//  Whether name is a privileged user the host came with
+function mpePrivAccount(sh, name) {
+    return name === 'MANAGER.SYS' || sh.ctx.host.accounts.concat(mpeStaff(sh.w)).some(function (a) { return a[0].toUpperCase() === name && a[2]; });
+}
+
+//  ;PASS=x and ;CAP=y from a NEWUSER or ALTUSER line
+function mpeParms(a) {
+    var out = {};
+    a.split(';').slice(1).forEach(function (kv) {
+        var m = /^\s*([A-Z]+)\s*=\s*(.*?)\s*$/i.exec(kv);
+        if (m) out[m[1].toUpperCase()] = m[2];
+    });
+    return out;
 }
 
 var MPE_HELP = {
@@ -6699,6 +6928,9 @@ var MPE_CMDS = {
         if (adminOnline(sh.ctx)) out += '#S2     EXEC        20   20       ' + t + '  MANAGER.SYS\n';
         sh.w.staff.slice(1, 1 + Math.min(4, sh.w.h.users)).forEach(function (n, i) {
             out += fit('#S' + (40 + i * 7), 8) + 'EXEC        ' + fit(String(30 + i), 5) + fit(String(30 + i), 9) + t + '  ' + n + '.' + sh.w.org + '\n';
+        });
+        keepOthersOn(sh.ctx.seed, sh.w.h.num).forEach(function (x, i) {
+            out += fit('#S' + (sh.job - 3 - i), 8) + 'EXEC        20   20       ' + t + '  ' + x.u + '\n';
         });
         out += fit('#S' + sh.job, 8) + 'EXEC        20   20       ' + t + '  ' + sh.user + '\n';
         sh.out(out + '\n');
@@ -6778,6 +7010,7 @@ var MPE_CMDS = {
             }
             if (f.node.log) logs++;
             delete f.gnode.kids[f.file];
+            keepMark(sh.fs, '/' + f.acct + '/' + f.group + '/' + f.file);
         });
         if (logs) cleaned(sh.ctx, sh.io);
     },
@@ -6818,6 +7051,8 @@ var MPE_CMDS = {
         }
         delete f.gnode.kids[f.file];
         gl.node.kids[to.file] = f.node;
+        keepMark(sh.fs, '/' + f.acct + '/' + f.group + '/' + f.file);
+        keepMark(sh.fs, '/' + to.acct + '/' + to.group + '/' + to.file);
     },
     TELL: function (sh, a) {
         var m = /^([A-Z0-9.#]+)\s*;?\s*(.*)$/i.exec(a);
@@ -6836,6 +7071,8 @@ var MPE_CMDS = {
         if (bluff(sh.ctx, sh.io, a)) return 'exit';
     },
     LISTUSER: function (sh, a) { return mpeListUser(sh, a); },
+    NEWUSER: function (sh, a) { return mpeNewUser(sh, a); },
+    ALTUSER: function (sh, a) { return mpeAltUser(sh, a); },
     LISTACCT: function (sh, a) {
         if (!sh.priv) {
             sh.out('LACKING SM OR AM CAPABILITY.  (CIERR 3010)\n');
@@ -6896,7 +7133,7 @@ function mpeListUser(sh, a) {
     var parts = set.split('.');
     var ure = mpePattern(parts[0] || '@');
     var are = mpePattern(parts[1] || sh.acct);
-    var users = sh.ctx.host.accounts.concat(mpeStaff(sh.w)).map(function (x) { return [x[0].toUpperCase(), String(x[1]).toUpperCase(), x[2]]; });
+    var users = keepAccounts(sh.ctx, sh.ctx.host.accounts.concat(mpeStaff(sh.w)), true).map(function (x) { return [x[0].toUpperCase(), String(x[1]).toUpperCase(), x[2]]; });
     var seen = {};
     var rows = users.filter(function (u) {
         var p = u[0].split('.');
@@ -6913,6 +7150,64 @@ function mpeListUser(sh, a) {
             'LOGON CNT : ' + (1 + hash32(u[0]) % 9) + '               CAP: ' + (u[2] ? 'SM,AM,AL,GL,ND,SF,BA,IA,PH' : 'ND,SF,BA,IA');
     }).join('\n') + '\n');
     gotLoot(sh.ctx, sh.io, 'the account report');
+}
+
+//  NEWUSER user[.acct];PASS=pw;CAP=SM,...: a new user in an account, as an
+//  account or system manager may add one
+function mpeNewUser(sh, a) {
+    if (!sh.priv) {
+        sh.out('LACKING SM OR AM CAPABILITY.  (CIERR 3010)\n');
+        return;
+    }
+    var name = (a.split(';')[0] || '').trim().toUpperCase();
+    if (!/^[A-Z][A-Z0-9]{0,7}(\.[A-Z][A-Z0-9]{0,7})?$/.test(name)) {
+        sh.out(name ? 'INVALID USER NAME.  (CIERR 1426)\n' : 'MISSING USER NAME.  (CIERR 3060)\n');
+        return;
+    }
+    if (name.indexOf('.') < 0) name += '.' + sh.acct;
+    if (!fsLook(sh.fs, '/', '/' + name.split('.')[1], { root: true }).node) {
+        sh.out('NON-EXISTENT ACCOUNT. (CIERR 1437)\n');
+        return;
+    }
+    var all = keepAccounts(sh.ctx, sh.ctx.host.accounts.concat(mpeStaff(sh.w)), true);
+    if (all.some(function (x) { return x[0].toUpperCase() === name; })) {
+        sh.out('DUPLICATE USER NAME.  (CIERR 3061)\n');
+        return;
+    }
+    var p = mpeParms(a);
+    keepAddAccount(sh.ctx, name, (p.PASS || '').toUpperCase(), /SM/.test((p.CAP || '').toUpperCase()));
+    mpeAudit(sh, 'NEWUSER ' + name + (p.CAP ? ';CAP=' + p.CAP.toUpperCase() : ''));
+}
+
+//  ALTUSER user[.acct];PASS=pw: a new password. MANAGER.SYS's takes the box.
+function mpeAltUser(sh, a) {
+    if (!sh.priv) {
+        sh.out('LACKING SM OR AM CAPABILITY.  (CIERR 3010)\n');
+        return;
+    }
+    var name = (a.split(';')[0] || '').trim().toUpperCase();
+    if (name && name.indexOf('.') < 0) name += '.' + sh.acct;
+    var all = keepAccounts(sh.ctx, sh.ctx.host.accounts.concat(mpeStaff(sh.w)), true);
+    var had = all.filter(function (x) { return x[0].toUpperCase() === name; })[0];
+    if (!had && name !== 'MANAGER.SYS') {
+        sh.out('NONEXISTENT USER.  (CIERR 1433)\n');
+        return;
+    }
+    var p = mpeParms(a);
+    if (p.PASS === undefined) return;
+    var pw = p.PASS.toUpperCase();
+    if (sh.ctx.ov.acc[name]) {
+        keepAddAccount(sh.ctx, name, pw, sh.ctx.ov.acc[name][1]);
+    } else if (mpePrivAccount(sh, name)) {
+        keepSetPassword(sh.ctx, name, pw);
+        sh.io.say('The ' + name + ' password is yours now. Anyone holding the old one is locked out. Careful what you leave behind.');
+    } else {
+        //  the ordinary users' passwords stay as they were: the ways in
+        //  are everyone's
+        sh.out('PASSWORD NOT CHANGED: USER IS LOGGED ON.  (CIWARN 3072)\n');
+        return;
+    }
+    mpeAudit(sh, 'ALTUSER ' + name + ';PASS=');
 }
 
 function mpeFcopy(sh) {
@@ -9043,16 +9338,17 @@ function gearScreen() {
 function crackPick() {
     var files = Object.keys(P.loot).filter(function (n) {
         var l = P.loot[n];
-        return P.found[n] === 'unix' && (l === 1 || String(l).split(',').indexOf('main') >= 0) &&
+        //  a passwd file, a SYSUAF listing or a PRIMOS user list
+        return ['unix', 'vms', 'prime'].indexOf(P.found[n]) >= 0 && (l === 1 || String(l).split(',').indexOf('main') >= 0) &&
             (!(P.cracked || {})[n] || crackStale(P, SEASON.seed, n)) && !(P.jobs || []).some(function (j) { return j.num === n; });
     });
     if (!files.length) {
-        out(at(H - 2, 1) + YEL + center('No passwd files to crack. cat /etc/passwd on a UNIX box first.', W) + BLK);
+        out(at(H - 2, 1) + YEL + center('Nothing to crack. Steal a passwd file or a VAX\'s SYSUAF list first.', W) + BLK);
         key(3000);
         return;
     }
     var items = files.slice(0, 10).map(function (n) { return { label: fmtNum(n), id: n }; });
-    out(box(6, 24, 34, items.length + 2, BLUE, 'Crack which passwd?'));
+    out(box(6, 24, 34, items.length + 2, BLUE, 'Crack which list?'));
     var pickNum = lightbarNoHot(items, 7, 25, 32, 0);
     //  root's password changed since the last run: Crack goes again
     if (pickNum && crackStale(P, SEASON.seed, pickNum) && P.cracked) delete P.cracked[pickNum];

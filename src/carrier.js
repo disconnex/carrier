@@ -1190,16 +1190,17 @@ function gearScreen() {
 function crackPick() {
     var files = Object.keys(P.loot).filter(function (n) {
         var l = P.loot[n];
-        return P.found[n] === 'unix' && (l === 1 || String(l).split(',').indexOf('main') >= 0) &&
+        //  a passwd file, a SYSUAF listing or a PRIMOS user list
+        return ['unix', 'vms', 'prime'].indexOf(P.found[n]) >= 0 && (l === 1 || String(l).split(',').indexOf('main') >= 0) &&
             (!(P.cracked || {})[n] || crackStale(P, SEASON.seed, n)) && !(P.jobs || []).some(function (j) { return j.num === n; });
     });
     if (!files.length) {
-        out(at(H - 2, 1) + YEL + center('No passwd files to crack. cat /etc/passwd on a UNIX box first.', W) + BLK);
+        out(at(H - 2, 1) + YEL + center('Nothing to crack. Steal a passwd file or a VAX\'s SYSUAF list first.', W) + BLK);
         key(3000);
         return;
     }
     var items = files.slice(0, 10).map(function (n) { return { label: fmtNum(n), id: n }; });
-    out(box(6, 24, 34, items.length + 2, BLUE, 'Crack which passwd?'));
+    out(box(6, 24, 34, items.length + 2, BLUE, 'Crack which list?'));
     var pickNum = lightbarNoHot(items, 7, 25, 32, 0);
     //  root's password changed since the last run: Crack goes again
     if (pickNum && crackStale(P, SEASON.seed, pickNum) && P.cracked) delete P.cracked[pickNum];

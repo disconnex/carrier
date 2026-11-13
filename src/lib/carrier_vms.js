@@ -279,7 +279,8 @@ function vmsMoveIn(fs, user, priv) {
     var home = VMS_HOMES[user] || '/' + user;
     fs.home = home;
     var look = fsLook(fs, '/', home, { root: true });
-    if (!look.node) {
+    //  none, or a player left a file where it was
+    if (!look.node || !look.node.dir) {
         var d = fsPut(fs.root, home, fsDir(user, priv ? 'SYSTEM' : 'USERS', 'rwxr-x---', vmsDate(90)));
         d.kids['LOGIN.COM'] = vmsFile(user, d.grp, 'rw-r-----', '$ SET TERMINAL/INQUIRE\n$ SET PROMPT="$ "\n', 90);
     }
@@ -521,6 +522,7 @@ function vmsWrite(sh, fac, sp, text) {
     f.ver = had ? (had.ver || 1) + 1 : 1;
     f.mt = vmsDate(0, function () { return 0.5; });
     d.node.kids[key] = f;
+    keepMark(sh.fs, sp.dir + '/' + key);
     return f;
 }
 
@@ -579,6 +581,7 @@ var VMS_QUIET = ['DIRECTORY', 'HELP', 'SHOW'];
 
 function runVMS(ctx, io) {
     var h = ctx.host;
+    ctx.ov = keepLoad(ctx.seed, h.num);
     var t = era();
     io.out('\r\n\r\n\r\n                 Welcome to VAX/VMS ' + h.version + '  on node ' + h.name + '\r\n');
     io.out('        ' + h.org + '  --  UNAUTHORIZED ACCESS PROHIBITED\r\n\r\n');
@@ -592,7 +595,7 @@ function runVMS(ctx, io) {
         var pw = io.line(false);
         if (pw === null) return;
         io.out('\r\n');
-        acct = findAccount(h, u.trim(), pw, true);
+        acct = findAccount({ accounts: keepAccounts(ctx, h.accounts, true) }, u.trim(), pw, true);
         if (!acct) {
             io.out('User authorization failure\r\n\r\n');
             failedLogin(ctx);
@@ -603,6 +606,7 @@ function runVMS(ctx, io) {
         return;
     }
     var fs = vmsTree(ctx);
+    keepOpen(ctx, fs, function () { return vmsTree(ctx); });
     var w = fs.w;
     var user = acct[0].toUpperCase();
     var priv = loggedIn(ctx, acct, io);
@@ -611,11 +615,22 @@ function runVMS(ctx, io) {
     sh.who = { user: user, groups: [priv ? 'SYSTEM' : w.staff.indexOf(user) >= 0 ? 'STAFF' : 'USERS'], root: !!priv };
     sh.out = function (s) { io.out(unixLines(s)); };
     var box = fsLook(fs, '/', fs.home + '/MAIL.MAI', { root: true }).node;
-    box.msgs = vmsMyMail(w, user, ctx);
+    box.msgs = vmsMyMail(w, user, ctx).concat(keepMail(ctx.seed, h.num).filter(function (m) { return m.to === user; }).map(function (m) {
+        return vmsMsg(w.name + '::' + m.from, m.to, m.subj, m.body, 0);
+    }));
     box.newMail = box.msgs.length;
     io.out('\r\n        Welcome to VAX/VMS version ' + h.version + ' on node ' + h.name + '\r\n');
     io.out('    Last interactive login on ' + t.day + ', ' + t.vms.slice(0, 11) + ' 09:14\r\n');
     io.out('\r\n    You have ' + box.newMail + ' new Mail messages.\r\n\r\n');
+    sh.tty = 'TTA' + (1 + v3.util.random(3)) + ':';
+    sh.on = keepOn(ctx, user, sh.tty);
+    vmsShell(sh);
+    keepOff(ctx, sh.on);
+}
+
+function vmsShell(sh) {
+    var ctx = sh.ctx;
+    var io = sh.io;
     for (;;) {
         io.out(sh.prompt);
         var cmd = io.line(true);
@@ -624,8 +639,29 @@ function runVMS(ctx, io) {
         if (!c) continue;
         var verb = c.charAt(0) === '@' ? '@' : vmsVerb(c.split(/[\s\/]/)[0], VMS_VERBS);
         if (verb !== 'PHONE' && verb !== 'LOGOUT' && watched(ctx, io, VMS_QUIET.indexOf(verb) >= 0 ? 0.3 : 1)) return;
-        if (vmsRun(sh, c, verb) === 'exit' || io.over) return;
+        var res = vmsRun(sh, c, verb);
+        if (keepSave(sh.fs) === 'full') {
+            sh.out('%RMS-F-FUL, device full (insufficient space for allocation)\n');
+            io.say('This VAX has no room for more of what players leave. What you just did lasts only this call.');
+        }
+        if (res === 'exit' || io.over) return;
     }
+}
+
+//  An audit entry in OPERATOR.LOG: what was done to SYSUAF, and from which
+//  account. Whoever reads the log later sees it.
+function vmsAudit(sh, event, lines) {
+    var t = era().vms;
+    keepLog(sh.fs, '/SYS0/SYSMGR/OPERATOR.LOG', ['%%%%%%%%%%%  OPCOM  ' + t + '  %%%%%%%%%%%', 'Message from user AUDIT$SERVER on ' + sh.w.name,
+        'Security alarm (SECURITY) and security audit (SECURITY) on ' + sh.w.name + ', system id: 1124',
+        'Auditable event:          ' + event, 'Event time:               ' + t, 'Username:                 ' + sh.user,
+        'Terminal name:            ' + (sh.tty || 'TTA1:')].concat(lines), 80);
+}
+
+//  Whether name is a privileged account the host came with: changing its
+//  password takes the box
+function vmsPrivAccount(sh, name) {
+    return name === 'SYSTEM' || sh.ctx.host.accounts.some(function (a) { return a[0].toUpperCase() === name && a[2]; });
 }
 
 //  Runs one command line. Returns 'exit' to end the session.
@@ -878,6 +914,7 @@ var VMS_CMDS = {
             }
             if (!up.node.kids[name]) {
                 up.node.kids[name] = fsDir(sh.who.user, sh.who.groups[0], 'rwxr-x---', vmsDate(0, function () { return 0.5; }));
+                keepMark(sh.fs, sp.dir);
                 if (vmsQ(q, 'LOG')) sh.out('%CREATE-I-CREATED, ' + vmsDirSpec(sp.dir) + ' created\n');
             }
             return;
@@ -925,6 +962,7 @@ var VMS_CMDS = {
                     return;
                 }
                 delete list.dir.kids[x[0]];
+                keepMark(sh.fs, sp.dir + '/' + x[0]);
                 if (vmsQ(q, 'LOG')) sh.out('%DELETE-I-FILDEL, ' + show + ' deleted (' + Math.max(1, Math.ceil(fsSize(x[1]) / 512)) + ' blocks)\n');
                 if (sp.dir === '/SYS0/SYSMGR' && x[0] === 'ACCOUNTNG.DAT') cleaned(sh.ctx, sh.io);
             });
@@ -1012,6 +1050,8 @@ function vmsCopy(sh, a, q, move) {
         }
         delete list.dir.kids[src[0]];
         to.node.kids[src[1].dir ? dp.name : dp.name + '.' + dp.type] = src[1];
+        keepMark(sh.fs, sp.dir + '/' + src[0]);
+        keepMark(sh.fs, dp.dir + '/' + (src[1].dir ? dp.name : dp.name + '.' + dp.type));
         if (vmsQ(q, 'LOG')) sh.out('%RENAME-I-RENAMED, ' + vmsDirSpec(sp.dir) + vmsName(src[0], src[1]) + ' renamed to ' + vmsDirSpec(dp.dir) + dp.name + '.' + dp.type + ';' + (src[1].ver || 1) + '\n');
         return;
     }
@@ -1062,7 +1102,12 @@ function vmsUAF(sh) {
     w.staff.forEach(function (n, i) {
         if (!rows.some(function (x) { return x[0] === n; })) rows.push([n, w.real[n].toUpperCase(), 'STAFF', '100,' + (1 + i), n === w.boss ? 'All' : 'Normal', '/' + n]);
     });
-    (sh.added || []).forEach(function (x) { rows.push(x); });
+    //  accounts players added
+    Object.keys(sh.ctx.ov.acc).forEach(function (n) {
+        if (!rows.some(function (x) { return x[0] === n; })) {
+            rows.push([n, n, 'USERS', '200,' + (50 + rows.length), sh.ctx.ov.acc[n][1] ? 'All' : 'Normal', '/' + n]);
+        }
+    });
     return rows;
 }
 
@@ -1121,18 +1166,41 @@ function vmsAuthorize(sh) {
             } else if (rows.some(function (x) { return x[0] === nu; })) {
                 sh.out('%UAF-W-UAEERR, invalid user name, user name already exists\n');
             } else {
-                sh.added = (sh.added || []).concat([[nu, nu, 'USERS', '200,' + (50 + rows.length), /ALL/i.test(String(vmsQ(p.q, 'PRIVILEGES') || '')) ? 'All' : 'Normal', '/' + nu]]);
+                //  AUTHORIZE's default password was USER
+                var npw = vmsQ(p.q, 'PASSWORD');
+                npw = npw && npw !== true ? String(npw) : 'USER';
+                var npriv = /ALL|SETPRV|CMKRNL|SYSPRV/i.test(String(vmsQ(p.q, 'PRIVILEGES') || ''));
+                keepAddAccount(sh.ctx, nu, npw, npriv);
+                vmsAudit(sh, 'System UAF record addition', ['Image name:               SYS$SYSTEM:AUTHORIZE.EXE', 'User record added:        ' + nu]);
                 sh.out('%UAF-I-ADDMSG, user record successfully added\n%UAF-I-RDBADDMSGU, identifier ' + nu + ' value [000200,0000' + (50 + rows.length) + '] added to rights data base\n');
             }
         } else if (v === 'MODIFY') {
             var mu = (p.words[1] || '').toUpperCase();
-            sh.out(rows.some(function (x) { return x[0] === mu; }) ? '%UAF-I-MDFYMSG, user record(s) updated\n' : '%UAF-W-BADUSR, username does not exist\n');
+            var mpw = vmsQ(p.q, 'PASSWORD');
+            if (!rows.some(function (x) { return x[0] === mu; })) {
+                sh.out('%UAF-W-BADUSR, username does not exist\n');
+            } else {
+                if (mpw && mpw !== true && (vmsPrivAccount(sh, mu) || sh.ctx.ov.acc[mu])) vmsSetPassword(sh, mu, String(mpw));
+                sh.out('%UAF-I-MDFYMSG, user record(s) updated\n');
+            }
         } else if (v === 'HELP') {
             sh.out('\n  ADD  EXIT  HELP  LIST  MODIFY  SHOW\n\n');
         } else {
             sh.out('%UAF-W-ISSPARSE, unrecognized command verb\n \\' + (p.words[0] || '').toUpperCase() + '\\\n');
         }
     }
+}
+
+//  A new password for name, kept: the system manager's takes the box
+function vmsSetPassword(sh, name, pw) {
+    if (sh.ctx.ov.acc[name]) {
+        keepAddAccount(sh.ctx, name, pw, sh.ctx.ov.acc[name][1]);
+    } else {
+        keepSetPassword(sh.ctx, name, pw);
+        sh.io.say('The ' + name + ' password is yours now. Anyone holding the old one is locked out. Careful what you leave behind.');
+    }
+    vmsAudit(sh, 'System UAF record modification', ['Image name:               SYS$SYSTEM:AUTHORIZE.EXE', 'User record modified:     ' + name,
+        'Fields modified:          PASSWORD']);
 }
 
 function vmsSet(sh, a, q, line) {
@@ -1183,6 +1251,7 @@ function vmsSet(sh, a, q, line) {
                     mode[at + 2] = /E/.test(kv[2]) ? 'x' : '-';
                 });
                 x[1].mode = mode.join('');
+                keepMark(sh.fs, sp2.dir + '/' + x[0]);
             });
         });
         return;
@@ -1203,6 +1272,10 @@ function vmsSet(sh, a, q, line) {
             sh.out('%SET-F-PWDNOTVER, new password not verified\n');
         } else if (nw.length < 6) {
             sh.out('%SET-F-INVPWDLEN, invalid password length - password not changed\n');
+        } else if (vmsPrivAccount(sh, sh.user) || sh.ctx.ov.acc[sh.user]) {
+            //  the system manager's password, or one a player added: it's
+            //  the caller's now
+            vmsSetPassword(sh, sh.user, nw);
         }
         return;
     case 'PROMPT':
@@ -1257,7 +1330,7 @@ function vmsShow(sh, a, q) {
         var out = '      VAX/VMS User Processes at ' + t.vms + '\n    Total number of users = ' + (h.users + 1) + ',  number of processes = ' + (h.users + 6) + '\n\n' +
             ' Username     Interactive  Subprocess   Batch\n';
         if (adminOnline(sh.ctx)) out += ' SYSTEM              1           1\n';
-        sh.w.staff.slice(1, 1 + Math.min(4, h.users)).concat([sh.user]).forEach(function (n) {
+        sh.w.staff.slice(1, 1 + Math.min(4, h.users)).concat(keepOthersOn(sh.ctx.seed, h.num).map(function (x) { return x.u; }), [sh.user]).forEach(function (n) {
             out += ' ' + fit(n, 12) + '        1\n';
         });
         sh.out(out);
@@ -1387,13 +1460,19 @@ function vmsMail(sh, a) {
             var body = vmsLines(sh);
             if (body === null) return 'exit';
             var name = String(to).toUpperCase().replace(/^.*::/, '');
-            if (sh.w.staff.indexOf(name) < 0 && name !== 'SYSTEM' && name !== sh.user) {
+            var known = sh.w.staff.indexOf(name) >= 0 || name === 'SYSTEM' || name === sh.user || !!sh.ctx.ov.acc[name] ||
+                sh.ctx.host.accounts.some(function (x) { return x[0].toUpperCase() === name; }) ||
+                keepSeen(sh.ctx.seed, sh.w.h.num).some(function (x) { return x.u === name; });
+            if (!known) {
                 sh.out('%MAIL-E-NOSUCHUSR, no such user ' + name + '\n');
                 continue;
             }
             if (name === sh.w.boss || name === 'SYSTEM') addHeat(sh.ctx.p, 2);
             if (name === sh.user) {
                 msgs.push(vmsMsg(sh.w.name + '::' + sh.user, sh.user, subj, body.join('\n'), 0));
+            } else if (name !== sh.w.boss && name !== 'SYSTEM') {
+                //  it waits there for whoever logs in as them, players included
+                keepSendMail(sh.ctx, name, sh.user, String(subj).slice(0, 60), body.join('\n').slice(0, 1000));
             }
         } else if (v === 'EXTRACT') {
             if (cur < 0) {

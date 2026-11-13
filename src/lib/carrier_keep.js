@@ -6,7 +6,9 @@
 //  In v3.data, per season seed:
 //    k.<seed>.<num>   the host's changes: { p: { path: entry },
 //                     by: { path: [uid, handle, ms] }, pw: { user: password },
-//                     pwBy: { user: [uid, handle, ms] } }
+//                     pwBy: { user: [uid, handle, ms] },
+//                     acc: { USER: [password, privileged] } (accounts players
+//                     added: AUTHORIZE, EDIT_PROFILE, NEWUSER) }
 //    km.<seed>.<num>  mail players sent there: [{ to, from, subj, body, at }]
 //    ko.<seed>.<num>  who was on lately: [{ u, id, tty, on, off }]
 //    kp.<seed>.<uid>  a player's changes, oldest first: [[num, path, ms]]
@@ -43,11 +45,12 @@ function keepLoad(seed, num) {
     ov.by = ov.by || {};
     ov.pw = ov.pw || {};
     ov.pwBy = ov.pwBy || {};
+    ov.acc = ov.acc || {};
     return ov;
 }
 
 function keepStore(seed, num, ov) {
-    if (!Object.keys(ov.p).length && !Object.keys(ov.pw).length) {
+    if (!Object.keys(ov.p).length && !Object.keys(ov.pw).length && !Object.keys(ov.acc).length) {
         v3.data.delete(keepKey(seed, num));
         return;
     }
@@ -92,6 +95,10 @@ function keepApply(fs, ov) {
                 node.onRead = was.onRead;
                 node.repeat = was.repeat;
                 node.dev = was.dev;
+                //  an MPE system log stays a log; a VMS file keeps its version
+                node.log = was.log;
+                node.code = was.code;
+                node.ver = was.ver;
             }
         }
         fsPut(fs.root, path, node);
@@ -231,6 +238,50 @@ function keepSetPassword(ctx, user, pw) {
     ov.pw[user] = pw;
     ov.pwBy[user] = [String(v3.user.id), ctx.p.h, nowMs()];
     keepStore(ctx.seed, ctx.host.num, ov);
+    if (ctx.ov) ctx.ov.pw[user] = pw;
+}
+
+//  A host's accounts as they are now: passwords players set put in, and
+//  the accounts players added. fold: names don't care about case (VMS,
+//  PRIMOS, MPE), and are kept upper case.
+function keepAccounts(ctx, list, fold) {
+    var ov = ctx.ov || keepLoad(ctx.seed, ctx.host.num);
+    var norm = function (n) { return fold ? String(n).toUpperCase() : String(n); };
+    var out = list.map(function (a) {
+        var pw = ov.pw[norm(a[0])];
+        return pw !== undefined ? [a[0], pw, a[2]] : a;
+    });
+    Object.keys(ov.acc).forEach(function (n) {
+        out = out.filter(function (a) { return norm(a[0]) !== n; });
+        out.push([n, ov.acc[n][0], !!ov.acc[n][1]]);
+    });
+    return out;
+}
+
+//  Adds an account to the host, or changes the password of one a player
+//  added
+function keepAddAccount(ctx, name, pw, priv) {
+    var ov = keepLoad(ctx.seed, ctx.host.num);
+    var prev = ov.pwBy[name];
+    if (ov.acc[name] && prev && prev[0] !== String(v3.user.id)) {
+        keepNotice(prev[0], 'The ' + name + ' account you left on ' + ctx.host.name + ' has been changed.');
+    }
+    ov.acc[name] = [pw, !!priv];
+    ov.pwBy[name] = [String(v3.user.id), ctx.p.h, nowMs()];
+    keepStore(ctx.seed, ctx.host.num, ov);
+    if (ctx.ov) ctx.ov.acc[name] = [pw, !!priv];
+}
+
+//  Adds lines to the end of a log file the system keeps (sulog, OPERATOR.LOG),
+//  keeping the last max of them, and marks it to be kept
+function keepLog(fs, path, lines, max) {
+    var look = fsLook(fs, '/', path, { root: true });
+    if (!look.node || look.node.dir) return;
+    var have = fsText(look.node).split('\n').filter(function (l) { return l; });
+    look.node.text = have.concat(lines).slice(-(max || 40)).join('\n') + '\n';
+    look.node.type = 'text';
+    delete look.node.size;
+    keepMark(fs, look.path);
 }
 
 //  ---- who was on ----
