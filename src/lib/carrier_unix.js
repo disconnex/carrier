@@ -553,6 +553,7 @@ function unixTree(ctx) {
     }
 
     unixFlavorTree(w, root, dir, put, old);
+    landTree(ctx, w, root);
     return { root: root, home: '/', w: w };
 }
 
@@ -704,6 +705,7 @@ function runUnix(ctx, io, preAuth) {
         io.say('A Cray. Every minute on this machine is billed to someone, and someone reads the bill.');
     }
     var user = acct[0];
+    landHello(ctx, io);
     unixMoveIn(fs, user, priv);
     //  a player may have removed it
     var motd = fsLook(fs, '/', '/etc/motd', { root: true }).node;
@@ -720,6 +722,7 @@ function runUnix(ctx, io, preAuth) {
     });
     unixShell(sh);
     deaf();
+    landBye(ctx, io);
     keepOff(ctx, sh.on);
 }
 
@@ -738,6 +741,7 @@ function unixShell(sh) {
         if (!/^(write|talk|exit|logout)$/.test(verb) && watched(ctx, io, UNIX_QUIET.indexOf(verb) >= 0 ? 0.3 : 1)) return;
         if (sh.priv) unixHistory(sh, c);
         var res = unixRun(sh, c);
+        landEach(ctx, io);
         if (keepSave(sh.fs) === 'full') {
             io.out(unixLines('ufs: NOTICE: alloc: /: file system full\n'));
             io.say('This box has no room for more of what players leave. What you just did lasts only this call.');
@@ -1776,7 +1780,8 @@ function unixEd(sh, file) {
             out(buf[cur - 1] + '\n');
         } else if (cmd === 'p' || cmd === 'n' || cmd === 'l') {
             if (from < 1) { bad(); continue; }
-            for (var i = from; i <= to; i++) out((cmd === 'n' ? i + '\t' : '') + buf[i - 1] + (cmd === 'l' ? '$' : '') + '\n');
+            //  n: the number, padded to the next tab stop as a terminal shows it
+            for (var i = from; i <= to; i++) out((cmd === 'n' ? fit(String(i), 8) : '') + buf[i - 1] + (cmd === 'l' ? '$' : '') + '\n');
             cur = to;
         } else if (cmd === 'a' || cmd === 'i' || cmd === 'c') {
             if ((cmd !== 'a' && from < 1) || (cmd === 'c' && !buf.length)) { bad(); continue; }

@@ -9,6 +9,7 @@
 //@include lib/carrier_prime.js
 //@include lib/carrier_mpe.js
 //@include lib/carrier_hosts.js
+//@include lib/carrier_land.js
 
 //
 //  CARRiER: a war dialer door game. You're at a DOS box in 1993: set a

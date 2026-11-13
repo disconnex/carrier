@@ -600,7 +600,27 @@ In steps, each playable:
      `EDIT_PROFILE.LOG`, MPE's `LOG####`) aren't swept: they're the trail.
    - Holding a box pays: each taken password that survives the day gives
      its holder 5 to 40 rep by organization.
-5. **The landmarks**, a few at a time, with their area codes.
+5. **The landmarks**, a few at a time, with their area codes. Built so
+   far (2026-11-13, src/lib/carrier_land.js), with the exchanges checked
+   against period sources:
+   - **The Institute**, 617-253 (its own exchange, its own switch since
+     1988). FISHBOWL at 617-253-0042, a 4.3 BSD box in the AI lab: guest
+     and tourist have no password, the motd welcomes tourists, students'
+     hacks are in /usr/hacks, and root's password is on the whiteboard.
+     A note there leads to the Institute's defense lab in Lexington
+     (617-981, a government exchange).
+   - **The Fort Meade facility**, 301-688 (the agency's best-known
+     exchange, still 301 after Maryland's 1991 split to 410). TERMINUS at
+     301-688-7140 is the honeypot: guest/guest gets in, it's full of
+     compartmented-looking projects, every command adds heat, and it says
+     on the way out that the session was recorded (heat +25). Its host
+     table gives the inner VAX, ANTEROOM at 301-688-2600, whose one known
+     account is the password TERMINUS's staff reused: steal TERMINUS's
+     passwd, Crack it, and dial in, very hot. A note mentions Kunia, the
+     next landmark.
+   - The first login to a landmark pays a bonus (30 to 150 rep).
+   - A season's boss and raids are drawn from the first sixteen area codes
+     only (SEASON_NPAS), so adding area codes (301 here) never moves them.
 6. **The CTF engine** and the first season's CTF.
 7. **Easter eggs**, added as we go.
 

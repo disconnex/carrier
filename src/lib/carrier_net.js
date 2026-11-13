@@ -18,6 +18,13 @@ var NPAS = [
     ['801', 'Salt Lake City, UT'],
 ];
 
+//  The area codes a season's boss and raids are drawn from: the first
+//  sixteen, kept as they were, so adding an area code to NPAS never moves
+//  a season's boss or its raid targets
+var SEASON_NPAS = NPAS.slice(0, 16);
+//  added with the landmarks (phase 6, step 5)
+NPAS.push(['301', 'Silver Spring, MD']);
+
 function npaCity(npa) {
     for (var i = 0; i < NPAS.length; i++) {
         if (NPAS[i][0] === npa) {
@@ -131,6 +138,10 @@ function lineResult(seed, npa, nxx, line) {
     }
     if (npa + nxx + line === bossNumber(seed)) {
         return { result: 'CARRIER', kind: 'scc' };
+    }
+    var lm = landmarkAt(npa + nxx + line);
+    if (lm) {
+        return { result: 'CARRIER', kind: lm.kind };
     }
     var p = PROFILES[prof];
     var key = seed + '|' + npa + nxx + line;
@@ -373,7 +384,8 @@ function hostAt(seed, num, kind, prof) {
         }
         h.accounts = h.accounts.concat([h.secret]);
     }
-    return h;
+    //  phase 6: a landmark's own host, over what was generated
+    return landHost(seed, h);
 }
 
 //  Phase 6: the share of an exchange's UNIX hosts that run IRIX, NeXTstep
@@ -512,7 +524,7 @@ function bossNumber(seed) {
     }
     BOSS_CACHE[seed] = '';
     var r = rng(hash32(seed + '|boss'));
-    var npa = NPAS[Math.floor(r() * NPAS.length)][0];
+    var npa = SEASON_NPAS[Math.floor(r() * SEASON_NPAS.length)][0];
     for (var tries = 0; tries < 2000; tries++) {
         var nxx = String(200 + Math.floor(r() * 800));
         if (exchangeProfile(seed, npa, nxx) === 'telco') {

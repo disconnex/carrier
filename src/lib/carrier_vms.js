@@ -270,6 +270,7 @@ function vmsTree(ctx) {
             }
         };
     }
+    landTree(ctx, w, root);
     return { root: root, home: '/', w: w };
 }
 
@@ -610,6 +611,7 @@ function runVMS(ctx, io) {
     var w = fs.w;
     var user = acct[0].toUpperCase();
     var priv = loggedIn(ctx, acct, io);
+    landHello(ctx, io);
     vmsMoveIn(fs, user, priv);
     var sh = { ctx: ctx, io: io, fs: fs, w: w, user: user, acct: acct, priv: priv, cwd: fs.home, prompt: '$ ' };
     sh.who = { user: user, groups: [priv ? 'SYSTEM' : w.staff.indexOf(user) >= 0 ? 'STAFF' : 'USERS'], root: !!priv };
@@ -630,6 +632,7 @@ function runVMS(ctx, io) {
     });
     vmsShell(sh);
     deaf();
+    landBye(ctx, io);
     keepOff(ctx, sh.on);
 }
 
@@ -645,6 +648,7 @@ function vmsShell(sh) {
         var verb = c.charAt(0) === '@' ? '@' : vmsVerb(c.split(/[\s\/]/)[0], VMS_VERBS);
         if (verb !== 'PHONE' && verb !== 'LOGOUT' && watched(ctx, io, VMS_QUIET.indexOf(verb) >= 0 ? 0.3 : 1)) return;
         var res = vmsRun(sh, c, verb);
+        landEach(ctx, io);
         if (keepSave(sh.fs) === 'full') {
             sh.out('%RMS-F-FUL, device full (insufficient space for allocation)\n');
             io.say('This VAX has no room for more of what players leave. What you just did lasts only this call.');

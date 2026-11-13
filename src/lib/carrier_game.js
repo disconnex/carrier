@@ -802,7 +802,7 @@ function raidAt(seed, i) {
     var t = RAID_TARGETS[i];
     var r = rng(hash32(seed + '|raid|' + i));
     for (var tries = 0; tries < 400; tries++) {
-        var npa = NPAS[Math.floor(r() * NPAS.length)][0];
+        var npa = SEASON_NPAS[Math.floor(r() * SEASON_NPAS.length)][0];
         var nxx = String(200 + Math.floor(r() * 800));
         var prof = exchangeProfile(seed, npa, nxx);
         if (!prof || prof === 'res') continue;
