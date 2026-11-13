@@ -333,7 +333,11 @@ function runHP(ctx, io) {
     sh.out = function (s) { io.out(unixLines(s)); };
     sh.tty = 'LDEV ' + (20 + v3.util.random(9));
     sh.on = keepOn(ctx, who, sh.tty);
+    var deaf = keepListen(ctx, io, who, sh.on, function (x) {
+        return unixLines('\nFROM/S' + (40 + hash32(x.from) % 50) + ' ' + x.from + '/' + x.m.replace(/\n/g, ' ') + '\n');
+    });
     mpeShell(sh);
+    deaf();
     keepOff(ctx, sh.on);
 }
 
@@ -568,6 +572,8 @@ var MPE_CMDS = {
             return;
         }
         var to = m[1].toUpperCase();
+        //  another player on as them gets it
+        if (m[2] && keepWriteTo(sh.ctx, to, sh.user, sh.tty, m[2])) return;
         if (to === 'MANAGER.SYS' || to === 'MGR.SYS') {
             if (bluff(sh.ctx, sh.io, m[2])) return 'exit';
             return;

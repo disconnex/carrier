@@ -12,6 +12,8 @@
 //    km.<seed>.<num>  mail players sent there: [{ to, from, subj, body, at }]
 //    ko.<seed>.<num>  who was on lately: [{ u, id, tty, on, off }]
 //    kp.<seed>.<uid>  a player's changes, oldest first: [[num, path, ms]]
+//    kw.<seed>.<num>  messages between players on the host now (write,
+//                     PHONE, MESSAGE, TELL): [{ to, from, tty, m, at, id }]
 //    kn.<uid>.<ms>.<rand>  a notice for a player: "your account on X is gone"
 //
 //  An entry is a directory { d: 1, o, g, m, t }, a file { o, g, m, t, x }
@@ -323,6 +325,44 @@ function keepClock(ms) {
     return (d.getHours() < 10 ? '0' : '') + d.getHours() + ':' + (d.getMinutes() < 10 ? '0' : '') + d.getMinutes();
 }
 
+//  ---- live messages between players ----
+
+//  Sends text to whoever is on the host now as user to. Returns false when
+//  nobody is.
+function keepWriteTo(ctx, to, from, tty, text) {
+    var up = String(to).toUpperCase();
+    if (!keepOthersOn(ctx.seed, ctx.host.num).some(function (x) { return String(x.u).toUpperCase() === up; })) return false;
+    var key = 'kw.' + ctx.seed + '.' + ctx.host.num;
+    var list = keepGet(key, []);
+    list.push({ to: up, from: from, tty: tty, m: String(text).slice(0, 400), at: nowMs(), id: String(v3.user.id) });
+    while (list.length > 20) list.shift();
+    v3.data.set(key, list);
+    return true;
+}
+
+//  Messages for the caller on as user since ms, taken out of the store
+function keepInbox(ctx, user, since) {
+    var key = 'kw.' + ctx.seed + '.' + ctx.host.num;
+    var list = keepGet(key, []);
+    if (!list.length) return [];
+    var up = String(user).toUpperCase();
+    var mine = function (x) { return x.to === up && x.id !== String(v3.user.id) && x.at >= since; };
+    var got = list.filter(mine);
+    if (got.length) v3.data.set(key, list.filter(function (x) { return !mine(x); }));
+    return got;
+}
+
+//  While a shell runs, the terminal checks for messages as it waits for a
+//  key; show turns one into what the host prints. Returns a function that
+//  puts back what was there before (a call from one host to another).
+function keepListen(ctx, io, user, since, show) {
+    var before = io.poll;
+    io.poll = function () {
+        return keepInbox(ctx, user, since).map(show).join('');
+    };
+    return function () { io.poll = before; };
+}
+
 //  ---- mail between players ----
 
 function keepMail(seed, num) {
@@ -343,6 +383,6 @@ function keepSendMail(ctx, to, from, subj, body) {
 function keepForget() {
     var all = v3.data.getAll();
     Object.keys(all).forEach(function (k) {
-        if (/^(k|km|ko|kp)\./.test(k)) v3.data.delete(k);
+        if (/^(k|km|ko|kp|kw)\./.test(k)) v3.data.delete(k);
     });
 }

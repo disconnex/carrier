@@ -713,7 +713,11 @@ function runUnix(ctx, io, preAuth) {
     sh.who = unixWho(w, user, priv);
     sh.tty = 'tty' + (1 + v3.util.random(3)) + 'a';
     sh.on = keepOn(ctx, user, sh.tty);
+    var deaf = keepListen(ctx, io, user, sh.on, function (x) {
+        return unixLines('\n\nMessage from ' + x.from + '@' + name + ' on ' + x.tty + ' at ' + keepClock(x.at) + ' ...\n' + x.m + '\nEOF\n');
+    });
     unixShell(sh);
+    deaf();
     keepOff(ctx, sh.on);
 }
 
@@ -849,7 +853,6 @@ function unixRun(sh, line) {
 //  the system's own we don't play out, or nothing at all
 var UNIX_OTHER = {
     vi: 'I don\'t know what kind of terminal you are on - all I have is \'unknown\'.\n[Using open mode]\n:q\n',
-    ed: '?\n',
     tar: 'tar: usage  tar -{txru}[cvfblmhopwBi] [tapefile] [blocksize] [replstr] file1 file2...\n',
     cpio: 'Usage: cpio -o[acvB] <name-list >collection\n',
     csh: '', login: '', sh: '',
@@ -1369,6 +1372,7 @@ var UNIX_CMDS = {
     rlogin: function (sh, a, say) { return unixRlogin(sh, a, say); },
     rsh: function (sh, a, say) { return unixRlogin(sh, a, say); },
     sync: function () {},
+    ed: function (sh, a) { return unixEd(sh, a.filter(function (x) { return x !== '-'; })[0]); },
     nidump: function (sh, a, say) { return unixNidump(sh, a, say); },
     niutil: function (sh, a, say) { return unixNiutil(sh, a, say); },
     udbsee: function (sh, a, say) { return unixUdbsee(sh, a, say); },
@@ -1592,6 +1596,18 @@ function unixPlayerMail(sh, user) {
 
 function unixWriteTo(sh, a, say) {
     if (!a[0]) { say('usage: write user [ttyname]\n'); return; }
+    //  another player on as them: lines until a period or ^D, then EOF
+    if (keepOthersOn(sh.ctx.seed, sh.w.h.num).some(function (x) { return x.u === a[0]; })) {
+        var lines = [];
+        for (;;) {
+            var l = sh.io.line(true);
+            if (l === null) return 'exit';
+            if (l === '.' || l === '\x04') break;
+            lines.push(l);
+        }
+        if (lines.length && !keepWriteTo(sh.ctx, a[0], sh.user, sh.tty, lines.join('\n'))) say('write: ' + a[0] + ' is not logged on.\n');
+        return;
+    }
     if (a[0] !== sh.w.boss) { say('write: ' + a[0] + ' has messages disabled\n'); return; }
     var msg = sh.io.line(true);
     if (msg === null) return 'exit';
@@ -1664,4 +1680,156 @@ function unixTrusting(sh, name, user) {
     };
     if (plus(home + '/.rhosts', user) || (user !== 'root' && plus('/etc/hosts.equiv', user))) return num;
     return '';
+}
+
+//  ed(1), the way a password file was edited by hand: an address, then a
+//  command. a, i and c take lines until a lone period. ? is every error.
+function unixEd(sh, file) {
+    var io = sh.io;
+    var out = function (t) { io.out(unixLines(t)); };
+    var buf = [];
+    var name = file || '';
+    if (name) {
+        var look = fsLook(sh.fs, sh.cwd, name, sh.who);
+        if (look.node && !look.node.dir) {
+            var got = unixRead(sh, 'ed', name, function () {});
+            if (got && got.text !== null) {
+                buf = got.text.replace(/\n$/, '').split('\n');
+                if (got.text === '') buf = [];
+                out(got.text.length + '\n');
+            } else {
+                out('?' + name + '\n');
+            }
+        } else {
+            out('?' + name + '\n');
+        }
+        //  what reading it gave (loot, a lead) comes now, not after ed
+        if (sh.after) {
+            var after = sh.after;
+            sh.after = null;
+            after.forEach(function (f) { f(sh.ctx, io); });
+        }
+    }
+    var cur = buf.length;
+    var dirty = false;
+    var warned = false;
+    var input = function () {
+        var lines = [];
+        for (;;) {
+            var l = io.line(true);
+            if (l === null) return null;
+            if (l === '.') return lines;
+            lines.push(l);
+        }
+    };
+    //  one address: a number, . $ +n -n or /re/; null when there is none
+    var addr = function (t) {
+        var m;
+        if ((m = /^(\d+)/.exec(t))) return { n: parseInt(m[1], 10), rest: t.slice(m[0].length) };
+        if (t.charAt(0) === '.') return { n: cur, rest: t.slice(1) };
+        if (t.charAt(0) === '$') return { n: buf.length, rest: t.slice(1) };
+        if ((m = /^([+-])(\d*)/.exec(t)) && m[0]) return { n: cur + (m[1] === '+' ? 1 : -1) * (m[2] ? parseInt(m[2], 10) : 1), rest: t.slice(m[0].length) };
+        if ((m = /^\/([^/]*)\/?/.exec(t))) {
+            var re;
+            try { re = new RegExp(m[1]); } catch (e) { return { err: true }; }
+            for (var k = 1; k <= buf.length; k++) {
+                var at = ((cur + k - 1) % buf.length) + 1;
+                if (re.test(buf[at - 1])) return { n: at, rest: t.slice(m[0].length) };
+            }
+            return { err: true };
+        }
+        return null;
+    };
+    for (;;) {
+        var c = io.line(true);
+        if (c === null) return 'exit';
+        var t = c.trim();
+        var from = undefined;
+        var to = undefined;
+        var bad = function () { out('?\n'); };
+        if (t.charAt(0) === ',') {
+            from = 1; to = buf.length; t = t.slice(1);
+        } else {
+            var a1 = addr(t);
+            if (a1 && a1.err) { bad(); continue; }
+            if (a1) {
+                from = to = a1.n; t = a1.rest;
+                if (t.charAt(0) === ',') {
+                    var a2 = addr(t.slice(1));
+                    if (!a2 || a2.err) { bad(); continue; }
+                    to = a2.n; t = a2.rest;
+                }
+            }
+        }
+        var cmd = t.charAt(0);
+        var arg = t.slice(1).trim();
+        var given = from !== undefined;
+        if (!given) { from = to = cur; }
+        if (from < 0 || to > buf.length || from > to) { bad(); continue; }
+        if (cmd === '') {
+            //  an address alone prints that line; Enter alone the next
+            if (!given) { from = to = cur + 1; }
+            if (to < 1 || to > buf.length) { bad(); continue; }
+            cur = to;
+            out(buf[cur - 1] + '\n');
+        } else if (cmd === 'p' || cmd === 'n' || cmd === 'l') {
+            if (from < 1) { bad(); continue; }
+            for (var i = from; i <= to; i++) out((cmd === 'n' ? i + '\t' : '') + buf[i - 1] + (cmd === 'l' ? '$' : '') + '\n');
+            cur = to;
+        } else if (cmd === 'a' || cmd === 'i' || cmd === 'c') {
+            if ((cmd !== 'a' && from < 1) || (cmd === 'c' && !buf.length)) { bad(); continue; }
+            var lines = input();
+            if (lines === null) return 'exit';
+            var at0 = cmd === 'a' ? to : cmd === 'i' ? Math.max(0, to - 1) : from - 1;
+            if (cmd === 'c') buf.splice(from - 1, to - from + 1);
+            buf.splice.apply(buf, [at0, 0].concat(lines));
+            cur = at0 + lines.length || at0;
+            dirty = true;
+        } else if (cmd === 'd') {
+            if (from < 1) { bad(); continue; }
+            buf.splice(from - 1, to - from + 1);
+            cur = Math.min(from, buf.length);
+            dirty = true;
+        } else if (cmd === 's') {
+            var sm = /^(.)(.*?)\1(.*?)(?:\1(g?))?$/.exec(t.slice(1));
+            if (!sm || from < 1) { bad(); continue; }
+            var sre;
+            try { sre = new RegExp(sm[2], sm[4] ? 'g' : ''); } catch (e) { bad(); continue; }
+            var hit = false;
+            for (var j = from; j <= to; j++) {
+                if (sre.test(buf[j - 1])) {
+                    sre.lastIndex = 0;
+                    buf[j - 1] = buf[j - 1].replace(sre, sm[3].replace(/&/g, '$&'));
+                    cur = j;
+                    hit = true;
+                }
+                sre.lastIndex = 0;
+            }
+            if (!hit) { bad(); continue; }
+            dirty = true;
+        } else if (cmd === '=') {
+            out((given ? to : buf.length) + '\n');
+        } else if (cmd === 'w') {
+            //  wq: write, then quit
+            var thenQuit = arg.charAt(0) === 'q';
+            if (thenQuit) arg = arg.slice(1).trim();
+            var wname = arg || name;
+            if (!wname) { bad(); continue; }
+            var text = buf.length ? buf.join('\n') + '\n' : '';
+            if (!unixWrite(sh, wname, text, false)) continue;
+            if (/\/adm\/wtmp$/.test(fsAbs(sh.cwd, wname, sh.fs.home)) && !text) cleaned(sh.ctx, io);
+            name = name || wname;
+            dirty = false;
+            out(text.length + '\n');
+            if (thenQuit) return;
+        } else if (cmd === 'q' || cmd === 'Q') {
+            if (cmd === 'q' && dirty && !warned) { warned = true; bad(); continue; }
+            return;
+        } else if (cmd === 'f') {
+            if (arg) name = arg;
+            out(name + '\n');
+        } else {
+            bad();
+        }
+    }
 }

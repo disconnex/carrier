@@ -576,7 +576,11 @@ In steps, each playable:
      which `PURGE LOG@.PUB.SYS` takes away; `SHOWJOB`.
    - Crack runs on a stolen SYSUAF list or PRIMOS user list too, and gets
      any weak password a player set or any weak account a player added.
-   Not done: `ed`; live `write` between two players on one box.
+   - `ed` on UNIX is a real line editor (`a i c d p n s w q`, addresses,
+     `/re/`), so a backdoor goes into `/etc/passwd` the way it was done.
+   - Two players on one box can reach each other: `write` on UNIX, `PHONE`
+     on VMS, `MESSAGE` on PRIMOS, `TELL` on MPE. The other side sees it at
+     their prompt within a few seconds, as the host would print it.
 4. **Admin sweeps** and hiding.
 5. **The landmarks**, a few at a time, with their area codes.
 6. **The CTF engine** and the first season's CTF.

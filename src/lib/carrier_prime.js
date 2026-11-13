@@ -352,7 +352,11 @@ function runPrime(ctx, io, preAuth) {
     sh.err = function (s) { sh.out(s + '\n'); sh.ok = false; };
     sh.tty = 'asr' + (1 + v3.util.random(3));
     sh.on = keepOn(ctx, name, sh.tty);
+    var deaf = keepListen(ctx, io, name, sh.on, function (x) {
+        return unixLines('\n*** ' + x.from + ' (user ' + (20 + (hash32(x.from) % 60)) + ') on ' + keepClock(x.at) + '\n' + x.m + '\n');
+    });
     primeShell(sh);
+    deaf();
     keepOff(ctx, sh.on);
 }
 
@@ -622,6 +626,16 @@ var PRIME_CMDS = {
             return;
         }
         var text = a.slice(1).join(' ');
+        //  another player on as them gets it
+        if (keepOthersOn(sh.ctx.seed, sh.w.h.num).some(function (x) { return x.u === to; })) {
+            if (!text) {
+                sh.out('Message: ');
+                text = sh.io.line(true);
+                if (text === null) return 'exit';
+            }
+            if (text) keepWriteTo(sh.ctx, to, sh.user, sh.tty, text);
+            return;
+        }
         if (to !== 'SYSTEM') {
             if (sh.w.staff.indexOf(to) < 0) sh.err('User ' + to + ' not found. (MESSAGE)');
             else sh.out('User ' + to + ' is not receiving messages. (MESSAGE)\n');

@@ -624,7 +624,11 @@ function runVMS(ctx, io) {
     io.out('\r\n    You have ' + box.newMail + ' new Mail messages.\r\n\r\n');
     sh.tty = 'TTA' + (1 + v3.util.random(3)) + ':';
     sh.on = keepOn(ctx, user, sh.tty);
+    var deaf = keepListen(ctx, io, user, sh.on, function (x) {
+        return unixLines('\n\x07%PHONE, call from ' + h.name + '::' + x.from + ' (' + x.tty + ') at ' + keepClock(x.at) + '\n  ' + x.m.replace(/\n/g, '\n  ') + '\n');
+    });
     vmsShell(sh);
+    deaf();
     keepOff(ctx, sh.on);
 }
 
@@ -977,6 +981,14 @@ var VMS_CMDS = {
         var to = (a[0] || '').toUpperCase().replace(/^.*::/, '');
         if (!to) {
             sh.out('%PHONE-W-NOSUCHUSER, no such user\n');
+            return;
+        }
+        //  another player on as them takes the call
+        if (keepOthersOn(sh.ctx.seed, sh.w.h.num).some(function (x) { return x.u === to; })) {
+            sh.out('Type your message: ');
+            var said = sh.io.line(true);
+            if (said === null) return 'exit';
+            if (said) keepWriteTo(sh.ctx, to, sh.user, sh.tty, said);
             return;
         }
         if (to !== 'SYSTEM') {

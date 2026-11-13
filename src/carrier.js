@@ -1369,7 +1369,17 @@ function cotTerm(num, via) {
         var v = '';
         status();
         for (;;) {
-            var k = key();
+            //  a shell that takes messages from other players looks for them
+            //  every few seconds while it waits
+            var k = key(call.poll ? 3000 : 0);
+            if (k === '' && call.poll) {
+                var msg = call.poll();
+                if (msg) {
+                    raw(msg);
+                    if (echo) out(v);
+                }
+                continue;
+            }
             var n = keyName(k);
             if (n === 'return') {
                 raw('\r\n');
