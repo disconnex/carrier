@@ -1761,7 +1761,7 @@ function collectMail(p) {
             v3.data.delete(k);
         }
     });
-    return notes.concat(keepNotices());
+    return notes.concat(keepNotices(p));
 }
 // ---- end lib/carrier_game.js ----
 // ---- lib/carrier_notes.js ----
@@ -2136,7 +2136,10 @@ function fsPattern(pat) {
 //                     by: { path: [uid, handle, ms] }, pw: { user: password },
 //                     pwBy: { user: [uid, handle, ms] },
 //                     acc: { USER: [password, privileged] } (accounts players
-//                     added: AUTHORIZE, EDIT_PROFILE, NEWUSER) }
+//                     added: AUTHORIZE, EDIT_PROFILE, NEWUSER),
+//                     h: [kind, profile, name, org] (for the sweep),
+//                     note: the security notice the admins put up }
+//    ksw.<seed>       the day the admins last swept
 //    km.<seed>.<num>  mail players sent there: [{ to, from, subj, body, at }]
 //    ko.<seed>.<num>  who was on lately: [{ u, id, tty, on, off }]
 //    kp.<seed>.<uid>  a player's changes, oldest first: [[num, path, ms]]
@@ -2179,8 +2182,14 @@ function keepLoad(seed, num) {
     return ov;
 }
 
+//  What the sweep needs to know about the host, kept with its changes
+function keepMeta(ctx, ov) {
+    var h = ctx.host;
+    ov.h = [h.kind, h.prof || 'biz', h.name, h.org || ''];
+}
+
 function keepStore(seed, num, ov) {
-    if (!Object.keys(ov.p).length && !Object.keys(ov.pw).length && !Object.keys(ov.acc).length) {
+    if (!Object.keys(ov.p).length && !Object.keys(ov.pw).length && !Object.keys(ov.acc).length && !ov.note) {
         v3.data.delete(keepKey(seed, num));
         return;
     }
@@ -2310,6 +2319,7 @@ function keepSave(fs) {
     if (Object.keys(ov.p).length > KEEP_FILES || keepBytes(ov) > KEEP_BYTES) {
         return 'full';
     }
+    keepMeta(ctx, ov);
     keepStore(ctx.seed, ctx.host.num, ov);
     Object.keys(lost).forEach(function (uid) {
         keepNotice(uid, 'Something you left on ' + ctx.host.name + ' (' + lost[uid] + ') has been changed.');
@@ -2339,17 +2349,22 @@ function keepPlanted(ctx, paths) {
     v3.data.set(key, list);
 }
 
-function keepNotice(uid, text) {
-    v3.data.set('kn.' + uid + '.' + nowMs() + '.' + v3.util.random(1000000), { m: text });
+//  A notice for a player's next game; heat and rep come with it
+function keepNotice(uid, text, heat, rep) {
+    v3.data.set('kn.' + uid + '.' + nowMs() + '.' + v3.util.random(1000000), { m: text, heat: heat || 0, rep: rep || 0 });
 }
 
-//  Notices waiting for this player: removed, and returned
-function keepNotices() {
+//  Notices waiting for this player: what they bring applied to p, removed,
+//  and returned
+function keepNotices(p) {
     var all = v3.data.getAll();
     var out = [];
     Object.keys(all).forEach(function (k) {
         if (k.indexOf('kn.' + v3.user.id + '.') === 0) {
-            out.push(all[k].m);
+            var n = all[k];
+            if (p && n.heat) addHeat(p, n.heat);
+            if (p && n.rep) p.rep += n.rep;
+            out.push(n.m);
             v3.data.delete(k);
         }
     });
@@ -2367,6 +2382,7 @@ function keepSetPassword(ctx, user, pw) {
     }
     ov.pw[user] = pw;
     ov.pwBy[user] = [String(v3.user.id), ctx.p.h, nowMs()];
+    keepMeta(ctx, ov);
     keepStore(ctx.seed, ctx.host.num, ov);
     if (ctx.ov) ctx.ov.pw[user] = pw;
 }
@@ -2398,6 +2414,7 @@ function keepAddAccount(ctx, name, pw, priv) {
     }
     ov.acc[name] = [pw, !!priv];
     ov.pwBy[name] = [String(v3.user.id), ctx.p.h, nowMs()];
+    keepMeta(ctx, ov);
     keepStore(ctx.seed, ctx.host.num, ov);
     if (ctx.ov) ctx.ov.acc[name] = [pw, !!priv];
 }
@@ -2505,13 +2522,120 @@ function keepSendMail(ctx, to, from, subj, body) {
     v3.data.set(key, list);
 }
 
+//  ---- the admins' sweep (phase 6, step 4) ----
+//  Once a day, on the first game of the day, the admins of every host where
+//  players left something look around. /tmp is emptied. Anything else a
+//  player left may be found, by chance: more on a watched box (government,
+//  the phone company), less when it's hidden (a dot file, a ... directory,
+//  a system directory), more when its owner is hot. What's found is taken
+//  away and its owner hears about it, with heat. A password a player set
+//  that survives pays its holder rep for the day; one that's found is put
+//  back, the box gets a security notice, and the Scene Daily hears.
+
+var SWEEP_CHANCE = { gov: 0.35, telco: 0.4, edu: 0.15, biz: 0.12, res: 0.05 };
+var SWEEP_HEAT = { gov: 15, telco: 20, edu: 6, biz: 5, res: 3 };
+var HOLD_REP = { gov: 30, telco: 40, edu: 15, biz: 10, res: 5 };
+
+//  A system's own logs and histories: the trail, not something planted
+function keepTrace(path) {
+    return /^\/\.(sh_)?history$|\/sulog$|\/OPERATOR\.LOG$|\/EDIT_PROFILE\.LOG$|^\/SYS\/PUB\/LOG\d{4}$/.test(path);
+}
+
+//  How likely the admins are to come across what's at path, against a
+//  thing in plain sight: they check the password files and trust files,
+//  and rarely look in dot files or among the system's own
+function keepHidden(path) {
+    var name = path.split('/').pop();
+    if (/^(passwd|shadow|hosts\.equiv|\.rhosts)$/.test(name)) return 1.3;
+    if (fsSplit(path).some(function (s) { return s.charAt(0) === '.' || /^\.\.\.+$/.test(s); })) return 0.35;
+    if (/^\/(dev|lib|usr\/lib|usr\/spool|usr\/adm|var\/adm|etc|bin|usr\/bin|SYS0|CMDNC0|SYSOVL|SYS)\//.test(path)) return 0.6;
+    return 1;
+}
+
+//  A player's heat as last saved, 0 to 100
+function keepHeatOf(uid) {
+    var p = uid ? v3.data.get('p.' + uid) : null;
+    return p && p.heat ? p.heat : 0;
+}
+
+//  The day's sweep, if it hasn't run today. Returns what it did, for tests:
+//  { found: [[uid, num, what]], held: [[uid, num, user]] }
+function keepSweep(seed) {
+    var day = today();
+    var dk = 'ksw.' + seed;
+    var res = { found: [], held: [] };
+    if (v3.data.get(dk) === day) return res;
+    //  first, so a second node opening the game now doesn't sweep again
+    v3.data.set(dk, day);
+    var all = v3.data.getAll();
+    var prefix = 'k.' + seed + '.';
+    Object.keys(all).forEach(function (key) {
+        if (key.indexOf(prefix) !== 0) return;
+        var num = key.slice(prefix.length);
+        var ov = keepLoad(seed, num);
+        var meta = ov.h || ['', 'biz', num, ''];
+        var prof = meta[1];
+        var base = SWEEP_CHANCE[prof] || 0.12;
+        var r = rng(hash32(seed + '|sweep|' + day + '|' + num));
+        var odds = function (uid, how) { return base * how * (1 + keepHeatOf(uid) / 50); };
+        var lost = {};
+        var caught = [];
+        Object.keys(ov.p).sort().forEach(function (path) {
+            if (keepTrace(path)) return;
+            var owner = ov.by[path] ? ov.by[path][0] : '';
+            var tmp = /^\/(tmp|var\/tmp|usr\/tmp)\//.test(path);
+            if (tmp || r() < odds(owner, keepHidden(path))) {
+                delete ov.p[path];
+                delete ov.by[path];
+                if (owner && !tmp) (lost[owner] = lost[owner] || []).push(path);
+            }
+        });
+        Object.keys(ov.acc).sort().forEach(function (n) {
+            var owner = ov.pwBy[n] ? ov.pwBy[n][0] : '';
+            if (r() < odds(owner, 1)) {
+                delete ov.acc[n];
+                delete ov.pwBy[n];
+                if (owner) (lost[owner] = lost[owner] || []).push('the ' + n + ' account');
+            }
+        });
+        Object.keys(ov.pw).sort().forEach(function (u) {
+            var owner = ov.pwBy[u] ? ov.pwBy[u][0] : '';
+            if (r() < odds(owner, 0.8)) {
+                delete ov.pw[u];
+                delete ov.pwBy[u];
+                caught.push(u);
+                if (owner) {
+                    keepNotice(owner, 'The admins on ' + meta[2] + ' caught on and put the ' + u + ' password back. Heat +' + 2 * (SWEEP_HEAT[prof] || 5) + '.',
+                        2 * (SWEEP_HEAT[prof] || 5), 0);
+                    res.found.push([owner, num, u]);
+                }
+            } else if (owner) {
+                var pay = HOLD_REP[prof] || 10;
+                keepNotice(owner, 'You still hold ' + meta[2] + ' (' + u + '). +' + pay + ' rep.', 0, pay);
+                res.held.push([owner, num, u]);
+            }
+        });
+        Object.keys(lost).forEach(function (uid) {
+            var heat = SWEEP_HEAT[prof] || 5;
+            keepNotice(uid, 'The admins on ' + meta[2] + ' found what you left (' + lost[uid].join(', ') + ') and cleaned it up. Heat +' + heat + '.', heat, 0);
+            lost[uid].forEach(function (w) { res.found.push([uid, num, w]); });
+        });
+        if (caught.length) {
+            ov.note = 'SECURITY NOTICE: an intruder was found on this system and removed. Change your password. Report anything unusual to the system manager.';
+            news('the scene', 'The admins at ' + (meta[3] || meta[2]) + ' caught an intruder on ' + meta[2] + ' and took the ' + caught.join(' and ') + ' password back.');
+        }
+        keepStore(seed, num, ov);
+    });
+    return res;
+}
+
 //  ---- the season's end ----
 
 //  Everything players left anywhere, gone with the old network
 function keepForget() {
     var all = v3.data.getAll();
     Object.keys(all).forEach(function (k) {
-        if (/^(k|km|ko|kp|kw)\./.test(k)) v3.data.delete(k);
+        if (/^(k|km|ko|kp|kw|ksw)\./.test(k)) v3.data.delete(k);
     });
 }
 // ---- end lib/carrier_keep.js ----
@@ -3226,6 +3350,8 @@ function runUnix(ctx, io, preAuth) {
     //  a player may have removed it
     var motd = fsLook(fs, '/', '/etc/motd', { root: true }).node;
     if (motd && !motd.dir) io.out(unixLines(fsText(motd)));
+    //  the admins' word after they threw someone off
+    if (ctx.ov.note) io.out(unixLines('\n  ' + ctx.ov.note + '\n\n'));
     io.out('You have mail.\r\n');
     var sh = { ctx: ctx, io: io, fs: fs, w: w, fl: fl, user: user, priv: priv, cwd: fs.home };
     sh.who = unixWho(w, user, priv);
@@ -4976,6 +5102,7 @@ function runVMS(ctx, io) {
     box.newMail = box.msgs.length;
     io.out('\r\n        Welcome to VAX/VMS version ' + h.version + ' on node ' + h.name + '\r\n');
     io.out('    Last interactive login on ' + t.day + ', ' + t.vms.slice(0, 11) + ' 09:14\r\n');
+    if (ctx.ov.note) io.out(unixLines('\n    ' + ctx.ov.note.toUpperCase() + '\n'));
     io.out('\r\n    You have ' + box.newMail + ' new Mail messages.\r\n\r\n');
     sh.tty = 'TTA' + (1 + v3.util.random(3)) + ':';
     sh.on = keepOn(ctx, user, sh.tty);
@@ -6262,6 +6389,7 @@ function runPrime(ctx, io, preAuth) {
     io.out(name + ' (user ' + num + ') logged in ' + t.prime + '.\r\n');
     io.out('Welcome to PRIMOS version ' + h.version + '.\r\nCopyright (c) Prime Computer, Inc. 1993.\r\n');
     io.out('Last login ' + t.prime.split('  ')[0] + '  08:41:02.\r\n\r\n');
+    if (ctx.ov.note) io.out(unixLines('*** ' + ctx.ov.note.toUpperCase() + '\n\n'));
     var priv = loggedIn(ctx, acct, io);
     var fs = primeTree(ctx);
     keepOpen(ctx, fs, function () { return primeTree(ctx); });
@@ -7054,6 +7182,7 @@ function runHP(ctx, io) {
     }
     io.out('HP3000 / MPE V ' + h.version + ' (BASE ' + h.version + '). ' + t.hp + '\r\n');
     io.out(unixLines(mpeWelcome(w)));
+    if (ctx.ov.note) io.out(unixLines(ctx.ov.note.toUpperCase() + '\n'));
     var priv = loggedIn(ctx, acct, io);
     var sh = { ctx: ctx, io: io, fs: fs, w: w, user: who, acct: acctName, group: group, priv: priv, job: 100 + h.users, pw: acct[1] };
     sh.who = { user: who, groups: [acctName], root: !!priv };
@@ -10000,6 +10129,7 @@ function main() {
     }
     H = Math.max(24, Math.min(25, v3.console.height || 24));
     SEASON = currentSeason();
+    keepSweep(SEASON.seed);
     P = loadPlayer();
     boot();
     if (!P) {

@@ -708,6 +708,8 @@ function runUnix(ctx, io, preAuth) {
     //  a player may have removed it
     var motd = fsLook(fs, '/', '/etc/motd', { root: true }).node;
     if (motd && !motd.dir) io.out(unixLines(fsText(motd)));
+    //  the admins' word after they threw someone off
+    if (ctx.ov.note) io.out(unixLines('\n  ' + ctx.ov.note + '\n\n'));
     io.out('You have mail.\r\n');
     var sh = { ctx: ctx, io: io, fs: fs, w: w, fl: fl, user: user, priv: priv, cwd: fs.home };
     sh.who = unixWho(w, user, priv);

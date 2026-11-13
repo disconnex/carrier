@@ -581,7 +581,25 @@ In steps, each playable:
    - Two players on one box can reach each other: `write` on UNIX, `PHONE`
      on VMS, `MESSAGE` on PRIMOS, `TELL` on MPE. The other side sees it at
      their prompt within a few seconds, as the host would print it.
-4. **Admin sweeps** and hiding.
+4. **Admin sweeps** and hiding (built 2026-11-13: keepSweep in
+   src/lib/carrier_keep.js). The first game of each day sweeps every host
+   where players left something:
+   - `/tmp` (and `/var/tmp`, `/usr/tmp`) is emptied.
+   - Each other file, account and password a player left is found by
+     chance: per day 35% on a government box, 40% at the phone company,
+     15% at a university, 12% at a business and 5% at home, times how
+     hidden it is (a third in a dot file or a `...` directory, 60% among
+     the system's own directories, 130% for the password and trust files
+     the admins check), times 1 + the owner's heat / 50. A taken password
+     is a little less likely to be noticed (80%).
+   - What's found goes back to how the host had it. Its owner hears about
+     it on their next game, with heat (3 to 20 by organization, double for
+     a taken password). A taken password that's found also puts a security
+     notice on the login and makes the Scene Daily, with no names.
+   - Logs and histories (sulog, root's history, `OPERATOR.LOG`,
+     `EDIT_PROFILE.LOG`, MPE's `LOG####`) aren't swept: they're the trail.
+   - Holding a box pays: each taken password that survives the day gives
+     its holder 5 to 40 rep by organization.
 5. **The landmarks**, a few at a time, with their area codes.
 6. **The CTF engine** and the first season's CTF.
 7. **Easter eggs**, added as we go.

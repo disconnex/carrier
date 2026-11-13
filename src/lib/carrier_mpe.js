@@ -327,6 +327,7 @@ function runHP(ctx, io) {
     }
     io.out('HP3000 / MPE V ' + h.version + ' (BASE ' + h.version + '). ' + t.hp + '\r\n');
     io.out(unixLines(mpeWelcome(w)));
+    if (ctx.ov.note) io.out(unixLines(ctx.ov.note.toUpperCase() + '\n'));
     var priv = loggedIn(ctx, acct, io);
     var sh = { ctx: ctx, io: io, fs: fs, w: w, user: who, acct: acctName, group: group, priv: priv, job: 100 + h.users, pw: acct[1] };
     sh.who = { user: who, groups: [acctName], root: !!priv };

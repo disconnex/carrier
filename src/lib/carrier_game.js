@@ -948,5 +948,5 @@ function collectMail(p) {
             v3.data.delete(k);
         }
     });
-    return notes.concat(keepNotices());
+    return notes.concat(keepNotices(p));
 }

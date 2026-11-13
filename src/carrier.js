@@ -1612,6 +1612,7 @@ function main() {
     }
     H = Math.max(24, Math.min(25, v3.console.height || 24));
     SEASON = currentSeason();
+    keepSweep(SEASON.seed);
     P = loadPlayer();
     boot();
     if (!P) {

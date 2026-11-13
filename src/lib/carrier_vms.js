@@ -621,6 +621,7 @@ function runVMS(ctx, io) {
     box.newMail = box.msgs.length;
     io.out('\r\n        Welcome to VAX/VMS version ' + h.version + ' on node ' + h.name + '\r\n');
     io.out('    Last interactive login on ' + t.day + ', ' + t.vms.slice(0, 11) + ' 09:14\r\n');
+    if (ctx.ov.note) io.out(unixLines('\n    ' + ctx.ov.note.toUpperCase() + '\n'));
     io.out('\r\n    You have ' + box.newMail + ' new Mail messages.\r\n\r\n');
     sh.tty = 'TTA' + (1 + v3.util.random(3)) + ':';
     sh.on = keepOn(ctx, user, sh.tty);

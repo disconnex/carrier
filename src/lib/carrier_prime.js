@@ -342,6 +342,7 @@ function runPrime(ctx, io, preAuth) {
     io.out(name + ' (user ' + num + ') logged in ' + t.prime + '.\r\n');
     io.out('Welcome to PRIMOS version ' + h.version + '.\r\nCopyright (c) Prime Computer, Inc. 1993.\r\n');
     io.out('Last login ' + t.prime.split('  ')[0] + '  08:41:02.\r\n\r\n');
+    if (ctx.ov.note) io.out(unixLines('*** ' + ctx.ov.note.toUpperCase() + '\n\n'));
     var priv = loggedIn(ctx, acct, io);
     var fs = primeTree(ctx);
     keepOpen(ctx, fs, function () { return primeTree(ctx); });
