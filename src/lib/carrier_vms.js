@@ -271,6 +271,7 @@ function vmsTree(ctx) {
         };
     }
     landTree(ctx, w, root);
+    ctfTree(ctx, root);
     return { root: root, home: '/', w: w };
 }
 

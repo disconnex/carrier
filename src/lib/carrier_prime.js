@@ -181,6 +181,7 @@ function primeTree(ctx) {
     //  EDIT_PROFILE's log of changes to the user list (no random draws:
     //  it comes last, so the rest of the tree stays as it was)
     put('/SAD/EDIT_PROFILE.LOG', primeFile('SYSTEM', 'SYSTEM', 'rw-------', '', 40));
+    ctfTree(ctx, root);
     return { root: root, home: '/', w: w };
 }
 

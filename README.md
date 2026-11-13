@@ -100,6 +100,7 @@ Settings go in the door's `args` in `doors.json`, as `name=value` words:
 | Setting | Default | What it does |
 |---|---|---|
 | `library` | *(unset)* | The file area the notebook sends players to for its textfiles. Unset, each page names the file and says to look in any textfile archive. See [docs/library.md](docs/library.md) for the list of files. |
+| `ctf` | *(unset)* | Which CTF the seasons run. Unset, each season runs the next file in `scripts/data/carrier/ctf/` in turn, or the built-in one, *Long Distance*, when there are none. `ctf=<name>` picks `<name>.json`; `ctf=off` turns CTFs off. See [docs/ctf.md](docs/ctf.md) to write your own. |
 | `brand` | `CoT` | The made-up 1993 software company: the title says "(c) 1993 *brand* Software", and the terminal program is "*brand*-TERM". Up to 12 letters, digits and spaces. |
 
 ## The textfile library (optional, recommended)

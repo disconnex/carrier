@@ -166,6 +166,7 @@ function mpeTree(ctx) {
             }
         };
     }
+    ctfTree(ctx, root);
     return { root: root, home: '/', w: w };
 }
 

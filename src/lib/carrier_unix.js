@@ -554,6 +554,7 @@ function unixTree(ctx) {
 
     unixFlavorTree(w, root, dir, put, old);
     landTree(ctx, w, root);
+    ctfTree(ctx, root);
     return { root: root, home: '/', w: w };
 }
 
@@ -1290,6 +1291,8 @@ var UNIX_CMDS = {
                 (on ? 'On since ' + t.slice(4, 16) + ' on ' + (n === w.boss ? 'console' : 'tty1a') + '\n' : 'Last login ' + t.slice(4, 10) + ' on tty2a\n'));
             var plan = fsLook(sh.fs, '/', home + '/.plan', { root: true }).node;
             say(plan ? 'Plan:\n' + fsText(plan) : 'No Plan.\n');
+            //  finger reads it as cat would (a CTF flag in a .plan)
+            if (plan && plan.onRead) sh.after = (sh.after || []).concat([plan.onRead]);
         });
     },
     last: function (sh, a, say) {

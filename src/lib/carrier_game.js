@@ -737,8 +737,9 @@ function currentSeason() {
         var st = raidState(s, i);
         if (st.done) raids.push(raidAt(s.seed, i).name + ': ' + st.done.mvp);
     }
+    var won = v3.data.get('ctfwin.' + s.id);
     v3.data.set('hof.' + s.id, { id: s.id, started: s.started, ended: today(), top: all[0] ? all[0].h + ' (' + all[0].rep + ' rep)' : '',
-        boss: s.bossDown || '', raids: raids });
+        boss: s.bossDown || '', raids: raids, ctf: won ? won.h + ' (' + won.title + ')' : '' });
     var next = { id: s.id + 1, seed: String(hash32(s.seed + '|next|' + (s.id + 1))), started: today() };
     v3.data.set('season', next);
     keepForget();
@@ -773,6 +774,7 @@ function resetForSeason(p, s) {
     p.wares = [];
     p.cracked = {};
     p.jobs = [];
+    p.ctf = {};
     p.leadNums = {};
     p.raidsClaimed = {};
     p.bossLogin = null;

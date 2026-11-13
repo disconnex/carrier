@@ -621,7 +621,15 @@ In steps, each playable:
    - The first login to a landmark pays a bonus (30 to 150 rep).
    - A season's boss and raids are drawn from the first sixteen area codes
      only (SEASON_NPAS), so adding area codes (301 here) never moves them.
-6. **The CTF engine** and the first season's CTF.
+6. **The CTF engine** and the first season's CTF (built 2026-11-13:
+   src/lib/carrier_ctf.js; the format for sysops is in docs/ctf.md). The
+   built-in CTF, Long Distance, has five flags: a dot file in a university
+   box's uucppublic; a root-only ROT13 file on the machine that box calls
+   at night (read its Systems or L.sys); a staff member's `.plan` on a
+   company box (`finger` or `cat`); a string inside a program on a
+   government box (`strings`); and a file on a university VAX. Each
+   season finds hosts for them from its seed and keeps the placement.
+   Flags can't be removed for good, and the sweep leaves them alone.
 7. **Easter eggs**, added as we go.
 
 ## Open questions

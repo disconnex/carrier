@@ -170,6 +170,11 @@ function keepSave(fs) {
     var ov = keepLoad(ctx.seed, ctx.host.num);
     var me = [String(v3.user.id), ctx.p.h, nowMs()];
     var lost = {};
+    //  a CTF flag stays as it is for everyone, and so does the way to it
+    var flags = ctfPaths(ctx);
+    paths = paths.filter(function (path) {
+        return !flags.some(function (f) { return f === path || f.indexOf(path + '/') === 0; });
+    });
     paths.forEach(function (path) {
         var e = keepEntry(fs, path);
         var prev = ov.by[path];
@@ -507,6 +512,6 @@ function keepSweep(seed) {
 function keepForget() {
     var all = v3.data.getAll();
     Object.keys(all).forEach(function (k) {
-        if (/^(k|km|ko|kp|kw|ksw)\./.test(k)) v3.data.delete(k);
+        if (/^(k|km|ko|kp|kw|ksw|ctf|ctfr|ctfh)\./.test(k)) v3.data.delete(k);
     });
 }

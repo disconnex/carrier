@@ -10,6 +10,7 @@
 //@include lib/carrier_mpe.js
 //@include lib/carrier_hosts.js
 //@include lib/carrier_land.js
+//@include lib/carrier_ctf.js
 
 //
 //  CARRiER: a war dialer door game. You're at a DOS box in 1993: set a
@@ -31,7 +32,7 @@ const VERSION = 'v1.5';
 //    brand=<name>    the made-up company of 1993: "<name> Software" in the
 //                    title and the terminal program "<name>-TERM" (default CoT)
 var SETTINGS = (function () {
-    var s = { library: '', brand: 'CoT' };
+    var s = { library: '', brand: 'CoT', ctf: '' };
     (v3.args || []).forEach(function (a) {
         var m = /^\s*(\w+)\s*=\s*(.*?)\s*$/.exec(String(a));
         if (m && s.hasOwnProperty(m[1].toLowerCase())) s[m[1].toLowerCase()] = m[2];
@@ -882,6 +883,11 @@ function rankings() {
     if (me >= show) {
         out(at(H - 2, 3) + YEL + 'You: #' + (me + 1) + ', ' + all[me].rep + ' rep' + BLK);
     }
+    var cp = ctfProgress(P, SEASON);
+    if (cp) {
+        var cw = v3.data.get('ctfwin.' + SEASON.id);
+        out(at(H - 1, 3) + DIM + 'CTF "' + cp[2] + '": you have ' + cp[0] + ' of ' + cp[1] + ' flags.' + (cw ? ' ' + cw.h + ' finished first.' : ' Nobody has finished yet.') + BLK);
+    }
     out(at(H, 1) + DIM + center(BRT + 'H' + DIM + ' Hall of Fame   any other key returns', W) + BLK);
     if (keyChar(key()).toLowerCase() === 'h') {
         hallScreen();
@@ -905,6 +911,7 @@ function hallScreen() {
         out(at(row++, 3) + YEL + 'Season ' + x.id + DIM + '  ' + x.started + ' to ' + x.ended + BLK);
         out(at(row++, 5) + BLK + fit('Top of the board', 18) + BRT + (x.top || '-') + BLK);
         out(at(row++, 5) + BLK + fit('Cracked the SCC', 18) + (x.boss ? GRN + x.boss : DIM + 'nobody') + BLK);
+        if (x.ctf) out(at(row++, 5) + BLK + fit('Won the CTF', 18) + GRN + x.ctf + BLK);
         (x.raids || []).slice(0, 4).forEach(function (r) {
             out(at(row++, 5) + DIM + fit('Raid', 18) + BLK + r + BLK);
         });
@@ -1614,6 +1621,7 @@ function main() {
     H = Math.max(24, Math.min(25, v3.console.height || 24));
     SEASON = currentSeason();
     keepSweep(SEASON.seed);
+    ctfHints(SEASON);
     P = loadPlayer();
     boot();
     if (!P) {
