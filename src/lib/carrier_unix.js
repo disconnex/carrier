@@ -294,7 +294,7 @@ function unixPrize(w) {
     var rows = [];
     var i;
     //  a Cray's prize is its time: who gets the hours, and on what
-    if (w.lay.fl === 'unicos') {
+    if (w.lay && w.lay.fl === 'unicos') {
         for (i = 0; i < 10; i++) {
             var alloc = 50 + Math.floor(r() * 950);
             rows.push(fit(pick(r, ['CFD', 'CLIMATE', 'QCD', 'SEISMIC', 'FUSION', 'CRYPTO', 'ORBITS']) + (100 + Math.floor(r() * 899)), 12) +
