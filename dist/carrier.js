@@ -1280,8 +1280,13 @@ function finishCracks(p, seed) {
         var r = rng(hash32(seed + '|crack|' + j.num));
         var users = someUsersFor(j.num, 5);
         var accts = [[users[1], pick(r, CRACK_WORDS), false], [users[3], pick(r, CRACK_WORDS), false]];
+        //  a root password a player set falls to the wordlist if it's weak
+        var rootNow = keepLoad(seed, j.num).pw.root;
+        if (rootNow !== undefined && crackWeak(rootNow, users)) accts.push(['root', rootNow, true]);
         p.cracked = p.cracked || {};
         p.cracked[j.num] = accts;
+        p.crackedAt = p.crackedAt || {};
+        p.crackedAt[j.num] = now;
         var res = { num: j.num, accounts: accts, reused: '' };
         var host = { num: j.num, kind: 'unix' };
         var next = neighbours(seed, host, 'unix', 1)[0];
@@ -1295,6 +1300,25 @@ function finishCracks(p, seed) {
         return false;
     });
     return done;
+}
+
+//  Words Crack's dictionary has besides CRACK_WORDS
+var CRACK_MORE = ['password', 'root', 'toor', 'admin', 'system', 'unix', 'hacker', 'god', 'love', 'sex', 'secret1', 'test',
+    'guest', 'master', 'cracker', 'phreak', 'elite', 'eleet', 'owned', 'r00t', 'h4x0r', 'carrier', 'modem', 'wargames'];
+
+//  Whether Crack 4.1 would get pw: a dictionary word, a user's name, or
+//  six lowercase letters or fewer
+function crackWeak(pw, users) {
+    var lw = String(pw).toLowerCase();
+    return CRACK_WORDS.indexOf(lw) >= 0 || CRACK_MORE.indexOf(lw) >= 0 || (users || []).indexOf(lw) >= 0 ||
+        /^[a-z]{1,6}$/.test(pw);
+}
+
+//  Whether root's password on num was changed after the player last ran
+//  Crack there, so another run is worth it
+function crackStale(p, seed, num) {
+    var by = keepLoad(seed, num).pwBy.root;
+    return !!by && by[2] > ((p.crackedAt || {})[num] || 0);
 }
 
 //  The made-up users of a host (as carrier_hosts.js someUsers names them)
@@ -1523,6 +1547,7 @@ function currentSeason() {
         boss: s.bossDown || '', raids: raids });
     var next = { id: s.id + 1, seed: String(hash32(s.seed + '|next|' + (s.id + 1))), started: today() };
     v3.data.set('season', next);
+    keepForget();
     news('the scene', 'Season ' + s.id + ' is over' + (s.bossDown ? ': ' + s.bossDown + ' cracked the phone company.' : '.') + ' The network is new.');
     seasonTips(next);
     return next;
@@ -1729,7 +1754,7 @@ function collectMail(p) {
             v3.data.delete(k);
         }
     });
-    return notes;
+    return notes.concat(keepNotices());
 }
 // ---- end lib/carrier_game.js ----
 // ---- lib/carrier_notes.js ----
@@ -1853,8 +1878,8 @@ function notesFor(p) {
 //  host, with owners and permissions, that the host's shell walks. A host's
 //  tree is built from the season seed when a call connects (carrier_unix.js
 //  builds a UNIX one); a file's text is made only when it's read. What the
-//  caller changes during a call goes into the tree itself, so it lasts the
-//  call; phase 6 step 3 keeps it longer.
+//  caller changes goes into the tree, and carrier_keep.js keeps it for the
+//  callers after them.
 //
 //  A node is a directory, a file or a symbolic link:
 //    { dir: true, kids: { name: node }, own, grp, mode, mt }
@@ -1989,6 +2014,25 @@ function fsLook(fs, cwd, path, who, noFollow, depth) {
     return { node: fs.root, parent: null, name: '/', path: '/' };
 }
 
+//  The path with the links on the way to its last part resolved, as
+//  /etc/passwd is /private/etc/passwd on a NeXT
+function fsReal(fs, abs) {
+    var parts = fsSplit(abs);
+    var d = fs.root;
+    var out = [];
+    for (var i = 0; i < parts.length - 1; i++) {
+        var n = d && d.dir ? d.kids[parts[i]] : null;
+        if (n && n.link) {
+            var to = n.link.charAt(0) === '/' ? n.link : '/' + out.join('/') + '/' + n.link;
+            return fsReal(fs, to + '/' + parts.slice(i + 1).join('/'));
+        }
+        out.push(parts[i]);
+        d = n;
+    }
+    if (parts.length) out.push(parts[parts.length - 1]);
+    return '/' + out.join('/');
+}
+
 //  A file's text (made the first time it's read)
 function fsText(node) {
     if (typeof node.text === 'function') {
@@ -2074,6 +2118,305 @@ function fsPattern(pat) {
     return new RegExp('^' + s + '$');
 }
 // ---- end lib/carrier_fs.js ----
+// ---- lib/carrier_keep.js ----
+//
+//  Persistence (phase 6, step 3): what players change on a host lasts, for
+//  everyone who calls it after them, until the season ends. The generated
+//  host is built from the seed as before; the changes are laid over it.
+//
+//  In v3.data, per season seed:
+//    k.<seed>.<num>   the host's changes: { p: { path: entry },
+//                     by: { path: [uid, handle, ms] }, pw: { user: password },
+//                     pwBy: { user: [uid, handle, ms] } }
+//    km.<seed>.<num>  mail players sent there: [{ to, from, subj, body, at }]
+//    ko.<seed>.<num>  who was on lately: [{ u, id, tty, on, off }]
+//    kp.<seed>.<uid>  a player's changes, oldest first: [[num, path, ms]]
+//    kn.<uid>.<ms>.<rand>  a notice for a player: "your account on X is gone"
+//
+//  An entry is a directory { d: 1, o, g, m, t }, a file { o, g, m, t, x }
+//  (x its text), a program or data file { o, g, m, t, y, z, s } (its type,
+//  size and strings), a link { l } or a removal { rm: 1 }: owner, group,
+//  mode, date as ls shows it.
+//
+
+var KEEP_FILES = 16;
+var KEEP_BYTES = 8192;
+var KEEP_PLANTED = 20;
+var KEEP_MAIL = 10;
+var KEEP_SEEN = 8;
+//  a caller whose hangup wasn't seen counts as on for this long
+var KEEP_ON_MS = 15 * 60000;
+
+function keepKey(seed, num) {
+    return 'k.' + seed + '.' + num;
+}
+
+//  A stored value, copied: v3.data hands back Go-backed values whose arrays
+//  don't grow
+function keepGet(key, dflt) {
+    var v = v3.data.get(key);
+    return v ? JSON.parse(JSON.stringify(v)) : dflt;
+}
+
+function keepLoad(seed, num) {
+    var ov = keepGet(keepKey(seed, num), null) || {};
+    ov.p = ov.p || {};
+    ov.by = ov.by || {};
+    ov.pw = ov.pw || {};
+    ov.pwBy = ov.pwBy || {};
+    return ov;
+}
+
+function keepStore(seed, num, ov) {
+    if (!Object.keys(ov.p).length && !Object.keys(ov.pw).length) {
+        v3.data.delete(keepKey(seed, num));
+        return;
+    }
+    v3.data.set(keepKey(seed, num), ov);
+}
+
+function keepDepth(path) {
+    return fsSplit(path).length;
+}
+
+//  The host's changes laid over its generated tree, shallowest first
+function keepApply(fs, ov) {
+    Object.keys(ov.p).sort(function (a, b) { return keepDepth(a) - keepDepth(b); }).forEach(function (path) {
+        var e = ov.p[path];
+        var parts = fsSplit(path);
+        if (!parts.length) return;
+        if (e.rm) {
+            var look = fsLook(fs, '/', path, { root: true }, true);
+            if (look.node && look.parent) delete look.parent.kids[look.name];
+            return;
+        }
+        var node;
+        if (e.l) {
+            node = { link: e.l };
+        } else if (e.d) {
+            var have = fsLook(fs, '/', path, { root: true }, true).node;
+            if (have && have.dir) {
+                have.own = e.o; have.grp = e.g; have.mode = e.m; have.mt = e.t;
+                return;
+            }
+            node = fsDir(e.o, e.g, e.m, e.t);
+        } else {
+            node = fsFile(e.o, e.g, e.m, e.x || '', e.t, e.y);
+            if (e.y) {
+                node.size = e.z;
+                node.strs = e.s || [];
+            }
+            //  what the generated file did when read (loot, a lead) it
+            //  still does
+            var was = fsLook(fs, '/', path, { root: true }, true).node;
+            if (was && !was.dir && !was.link) {
+                node.onRead = was.onRead;
+                node.repeat = was.repeat;
+                node.dev = was.dev;
+            }
+        }
+        fsPut(fs.root, path, node);
+    });
+}
+
+//  The entry that records what is at path now
+function keepEntry(fs, path) {
+    var look = fsLook(fs, '/', path, { root: true }, true);
+    var n = look.node;
+    if (!n) return { rm: 1 };
+    if (n.link) return { l: n.link };
+    if (n.dir) return { d: 1, o: n.own, g: n.grp, m: n.mode, t: n.mt };
+    if (n.type !== 'text') {
+        //  a program or data: its kind, size and strings, not its bytes
+        return { o: n.own, g: n.grp, m: n.mode, t: n.mt, y: n.type, z: fsSize(n), s: n.strs || [] };
+    }
+    return { o: n.own, g: n.grp, m: n.mode, t: n.mt, x: fsText(n) };
+}
+
+//  Marks a path the caller changed, to be kept when the command is done
+function keepMark(fs, path) {
+    if (!fs.keep) return;
+    fs.keep.dirty[fsReal(fs, fsAbs('/', path, fs.home))] = true;
+}
+
+function keepBytes(ov) {
+    var n = 0;
+    Object.keys(ov.p).forEach(function (k) { n += k.length + (ov.p[k].x || '').length; });
+    return n;
+}
+
+//  Sets up a host's tree to keep what the caller changes. pristine() builds
+//  the host as generated, to tell a removed generated file from a removed
+//  file a player made.
+function keepOpen(ctx, fs, pristine) {
+    var ov = keepLoad(ctx.seed, ctx.host.num);
+    keepApply(fs, ov);
+    fs.keep = { ctx: ctx, dirty: {}, pristine: pristine, gen: null };
+    return ov;
+}
+
+//  Whether the generated host has something at path
+function keepGenerated(fs, path) {
+    if (!fs.keep.gen) fs.keep.gen = fs.keep.pristine();
+    return !!fsLook(fs.keep.gen, '/', path, { root: true }, true).node;
+}
+
+//  Keeps what the last command changed. Returns '' or 'full' when the host
+//  has no room for it (it then lasts only the call).
+function keepSave(fs) {
+    var k = fs.keep;
+    if (!k) return '';
+    var paths = Object.keys(k.dirty);
+    if (!paths.length) return '';
+    k.dirty = {};
+    var ctx = k.ctx;
+    var ov = keepLoad(ctx.seed, ctx.host.num);
+    var me = [String(v3.user.id), ctx.p.h, nowMs()];
+    var lost = {};
+    paths.forEach(function (path) {
+        var e = keepEntry(fs, path);
+        var prev = ov.by[path];
+        if (prev && prev[0] !== me[0]) lost[prev[0]] = path;
+        //  a removal takes what was kept under it with it
+        if (e.rm) {
+            Object.keys(ov.p).forEach(function (q) {
+                if (q.indexOf(path + '/') === 0) { delete ov.p[q]; delete ov.by[q]; }
+            });
+            if (!keepGenerated(fs, path)) {
+                delete ov.p[path];
+                delete ov.by[path];
+                return;
+            }
+        }
+        ov.p[path] = e;
+        ov.by[path] = me;
+    });
+    if (Object.keys(ov.p).length > KEEP_FILES || keepBytes(ov) > KEEP_BYTES) {
+        return 'full';
+    }
+    keepStore(ctx.seed, ctx.host.num, ov);
+    Object.keys(lost).forEach(function (uid) {
+        keepNotice(uid, 'Something you left on ' + ctx.host.name + ' (' + lost[uid] + ') has been changed.');
+    });
+    keepPlanted(ctx, paths.filter(function (p) { return ov.p[p]; }));
+    return '';
+}
+
+//  A player's own list of changes, kept to KEEP_PLANTED: the oldest goes
+//  back to what the host had
+function keepPlanted(ctx, paths) {
+    if (!paths.length) return;
+    var key = 'kp.' + ctx.seed + '.' + v3.user.id;
+    var list = keepGet(key, []).filter(function (x) {
+        return !(x[0] === ctx.host.num && paths.indexOf(x[1]) >= 0);
+    });
+    paths.forEach(function (p) { list.push([ctx.host.num, p, nowMs()]); });
+    while (list.length > KEEP_PLANTED) {
+        var old = list.shift();
+        var ov = keepLoad(ctx.seed, old[0]);
+        if (ov.by[old[1]] && ov.by[old[1]][0] === String(v3.user.id)) {
+            delete ov.p[old[1]];
+            delete ov.by[old[1]];
+            keepStore(ctx.seed, old[0], ov);
+        }
+    }
+    v3.data.set(key, list);
+}
+
+function keepNotice(uid, text) {
+    v3.data.set('kn.' + uid + '.' + nowMs() + '.' + v3.util.random(1000000), { m: text });
+}
+
+//  Notices waiting for this player: removed, and returned
+function keepNotices() {
+    var all = v3.data.getAll();
+    var out = [];
+    Object.keys(all).forEach(function (k) {
+        if (k.indexOf('kn.' + v3.user.id + '.') === 0) {
+            out.push(all[k].m);
+            v3.data.delete(k);
+        }
+    });
+    return out;
+}
+
+//  ---- passwords ----
+
+//  Sets user's password on the host, as root does with passwd
+function keepSetPassword(ctx, user, pw) {
+    var ov = keepLoad(ctx.seed, ctx.host.num);
+    var prev = ov.pwBy[user];
+    if (prev && prev[0] !== String(v3.user.id)) {
+        keepNotice(prev[0], 'The ' + user + ' password you set on ' + ctx.host.name + ' doesn\'t work any more.');
+    }
+    ov.pw[user] = pw;
+    ov.pwBy[user] = [String(v3.user.id), ctx.p.h, nowMs()];
+    keepStore(ctx.seed, ctx.host.num, ov);
+}
+
+//  ---- who was on ----
+
+function keepSeen(seed, num) {
+    return keepGet('ko.' + seed + '.' + num, []);
+}
+
+//  Records the caller on the host as user; returns their entry's index
+function keepOn(ctx, user, tty) {
+    var key = 'ko.' + ctx.seed + '.' + ctx.host.num;
+    var list = keepSeen(ctx.seed, ctx.host.num);
+    list.push({ u: user, id: String(v3.user.id), tty: tty, on: nowMs(), off: 0 });
+    while (list.length > KEEP_SEEN) list.shift();
+    v3.data.set(key, list);
+    return list[list.length - 1].on;
+}
+
+function keepOff(ctx, on) {
+    var key = 'ko.' + ctx.seed + '.' + ctx.host.num;
+    var list = keepSeen(ctx.seed, ctx.host.num);
+    list.forEach(function (x) {
+        if (x.on === on && x.id === String(v3.user.id)) x.off = nowMs();
+    });
+    v3.data.set(key, list);
+}
+
+//  Other players on the host now, and everyone on it lately
+function keepOthersOn(seed, num) {
+    var now = nowMs();
+    return keepSeen(seed, num).filter(function (x) {
+        return x.id !== String(v3.user.id) && !x.off && now - x.on < KEEP_ON_MS;
+    });
+}
+
+//  A real clock time as hh:mm
+function keepClock(ms) {
+    var d = new Date(ms);
+    return (d.getHours() < 10 ? '0' : '') + d.getHours() + ':' + (d.getMinutes() < 10 ? '0' : '') + d.getMinutes();
+}
+
+//  ---- mail between players ----
+
+function keepMail(seed, num) {
+    return keepGet('km.' + seed + '.' + num, []);
+}
+
+function keepSendMail(ctx, to, from, subj, body) {
+    var key = 'km.' + ctx.seed + '.' + ctx.host.num;
+    var list = keepMail(ctx.seed, ctx.host.num);
+    list.push({ to: to, from: from, subj: subj, body: body, at: nowMs() });
+    while (list.length > KEEP_MAIL) list.shift();
+    v3.data.set(key, list);
+}
+
+//  ---- the season's end ----
+
+//  Everything players left anywhere, gone with the old network
+function keepForget() {
+    var all = v3.data.getAll();
+    Object.keys(all).forEach(function (k) {
+        if (/^(k|km|ko|kp)\./.test(k)) v3.data.delete(k);
+    });
+}
+// ---- end lib/carrier_keep.js ----
 // ---- lib/carrier_unix.js ----
 //
 //  CARRiER's UNIX hosts (phase 6): a whole filesystem per machine, laid out
@@ -2180,6 +2523,8 @@ function unixWorld(ctx) {
     w.sister = neighbours(ctx.seed, h, 'unix', 1)[0] || '';
     w.sisterName = w.sister ? hostAtNum(ctx, w.sister, 'unix').name.toLowerCase() : '';
     w.rootpw = h.secret[1];
+    //  what root's password is now: a player may have changed it
+    w.rootNow = ctx.ov && ctx.ov.pw.root !== undefined ? ctx.ov.pw.root : w.rootpw;
     return w;
 }
 
@@ -2192,6 +2537,47 @@ function unixHome(w, user) {
 //  An account the host leaves open: its password is empty
 function unixOpen(h, user) {
     return h.accounts.some(function (a) { return a[0] === user && a[1] === ''; });
+}
+
+//  Accounts players added to the host's password file with no password:
+//  { user: { root } }. A line like kid::0:0::/:/bin/sh is a backdoor, root
+//  if its uid is 0. On Release 4 the password can be the shadow file's.
+function unixBackdoors(ov) {
+    var text = function (path) {
+        var e = ov && (ov.p[path] || ov.p['/private' + path]);
+        return e && !e.rm ? e.x || '' : '';
+    };
+    var shadow = {};
+    text('/etc/shadow').split('\n').forEach(function (l) {
+        var f = l.split(':');
+        if (f.length > 1) shadow[f[0]] = f[1];
+    });
+    var out = {};
+    text('/etc/passwd').split('\n').forEach(function (l) {
+        var f = l.split(':');
+        if (f.length < 3 || !f[0]) return;
+        var pw = f[1] === 'x' && shadow[f[0]] !== undefined ? shadow[f[0]] : f[1];
+        if (pw === '') out[f[0]] = { root: f[2] === '0' };
+    });
+    return out;
+}
+
+//  Whether user logs in with no password: left open, or a backdoor
+function unixNoPassword(ctx, user) {
+    if (ctx.ov.pw[user] !== undefined) return ctx.ov.pw[user] === '';
+    return unixOpen(ctx.host, user) || !!unixBackdoors(ctx.ov)[user];
+}
+
+//  The account user and pw log in to, or null. A password a player set
+//  is the only one that works for that user now.
+function unixAuth(ctx, user, pw) {
+    var ov = ctx.ov;
+    if (ov.pw[user] !== undefined) {
+        return pw === ov.pw[user] ? [user, pw, user === 'root'] : null;
+    }
+    var door = unixBackdoors(ov)[user];
+    if (door && pw === '') return [user, '', door.root];
+    return findAccount(ctx.host, user, pw, false);
 }
 
 //  ---- the generated text ----
@@ -2208,7 +2594,7 @@ function unixCrypt(s) {
 function unixPasswd(w, shadowed) {
     var h = w.h;
     var rows = unixSystemUsers(w.lay).filter(function (u) { return w.staff.indexOf(u[0]) < 0; }).map(function (u) {
-        var pw = u[0] === 'root' ? unixCrypt(h.num + '|root|' + w.rootpw) : unixOpen(h, u[0]) ? '' : u[1] >= 200 || u[6] ? unixCrypt(h.num + u[0]) : w.lay.berk ? '*' : 'NP';
+        var pw = u[0] === 'root' ? unixCrypt(h.num + '|root|' + w.rootNow) : unixOpen(h, u[0]) ? '' : u[1] >= 200 || u[6] ? unixCrypt(h.num + u[0]) : w.lay.berk ? '*' : 'NP';
         if (u[1] >= 200 && !u[6] && !h.accounts.some(function (a) { return a[0] === u[0]; })) {
             return null;
         }
@@ -2642,6 +3028,8 @@ function unixMoveIn(fs, user, priv) {
         fsPut(fs.root, home, fsDir(user, 'guest', 'rwxr-xr-x', fsDate(90)));
     }
     var hd = fsLook(fs, '/', home, who).node;
+    //  a player may have left a file where the directory was
+    if (!hd.dir) hd = fsPut(fs.root, home, fsDir(user, 'guest', 'rwxr-xr-x', fsDate(90)));
     if (!priv && (made || w.staff.indexOf(user) >= 0)) {
         hd.kids.notes = fsFile(user, hd.grp, 'rw-r--r--', 'cron job for backups is broken again\ntell field svc the uucp account is still open\n' +
             'uucp keeps its list of systems in /usr/lib/uucp\n', fsDate(12));
@@ -2691,6 +3079,7 @@ function unixErr(fl, cmd, path, why) {
 
 function runUnix(ctx, io, preAuth) {
     var h = ctx.host;
+    ctx.ov = keepLoad(ctx.seed, h.num);
     var t = era();
     var name = h.name.toLowerCase();
     var fl0 = unixFlavor(h);
@@ -2704,13 +3093,13 @@ function runUnix(ctx, io, preAuth) {
         if (!u.trim()) continue;
         //  an account with no password doesn't ask for one
         var pw = '';
-        if (!unixOpen(h, u.trim())) {
+        if (!unixNoPassword(ctx, u.trim())) {
             io.out('Password:');
             pw = io.line(false);
             if (pw === null) return;
             io.out('\r\n');
         }
-        acct = findAccount(h, u.trim(), pw, false);
+        acct = unixAuth(ctx, u.trim(), pw);
         if (!acct) {
             io.out('Login incorrect\r\n');
             failedLogin(ctx);
@@ -2721,6 +3110,7 @@ function runUnix(ctx, io, preAuth) {
         return;
     }
     var fs = unixTree(ctx);
+    keepOpen(ctx, fs, function () { return unixTree(ctx); });
     var w = fs.w;
     var fl = w.lay.fl;
     io.out('Last login: ' + t.unix.slice(0, 16) + ' on tty' + (h.users % 4) + 'a\r\n');
@@ -2735,10 +3125,21 @@ function runUnix(ctx, io, preAuth) {
     }
     var user = acct[0];
     unixMoveIn(fs, user, priv);
-    io.out(unixLines(fsText(fsLook(fs, '/', '/etc/motd', { root: true }).node)));
+    //  a player may have removed it
+    var motd = fsLook(fs, '/', '/etc/motd', { root: true }).node;
+    if (motd && !motd.dir) io.out(unixLines(fsText(motd)));
     io.out('You have mail.\r\n');
     var sh = { ctx: ctx, io: io, fs: fs, w: w, fl: fl, user: user, priv: priv, cwd: fs.home };
     sh.who = unixWho(w, user, priv);
+    sh.tty = 'tty' + (1 + v3.util.random(3)) + 'a';
+    sh.on = keepOn(ctx, user, sh.tty);
+    unixShell(sh);
+    keepOff(ctx, sh.on);
+}
+
+function unixShell(sh) {
+    var ctx = sh.ctx;
+    var io = sh.io;
     for (;;) {
         io.out(sh.priv ? '# ' : '$ ');
         var cmd = io.line(true);
@@ -2749,8 +3150,41 @@ function runUnix(ctx, io, preAuth) {
         var verb = c.split(' ')[0];
         //  talking to the admin, or leaving, isn't more poking around
         if (!/^(write|talk|exit|logout)$/.test(verb) && watched(ctx, io, UNIX_QUIET.indexOf(verb) >= 0 ? 0.3 : 1)) return;
-        if (unixRun(sh, c) === 'exit' || io.over) return;
+        if (sh.priv) unixHistory(sh, c);
+        var res = unixRun(sh, c);
+        if (keepSave(sh.fs) === 'full') {
+            io.out(unixLines('ufs: NOTICE: alloc: /: file system full\n'));
+            io.say('This box has no room for more of what players leave. What you just did lasts only this call.');
+        }
+        if (res === 'exit' || io.over) return;
     }
+}
+
+//  Root's shell history: what was typed as root, kept, so whoever looks
+//  later can see what was done here (and the one who did it can clean up)
+function unixHistory(sh, line) {
+    var path = sh.w.lay.csh ? '/.history' : '/.sh_history';
+    var look = fsLook(sh.fs, '/', path, { root: true });
+    if (!look.node) {
+        look.node = look.parent.kids[look.name] = fsFile('root', 'root', 'rw-------', '', fsDate(0, function () { return 0.5; }));
+    }
+    var lines = fsText(look.node).split('\n').filter(function (l) { return l; });
+    lines.push(line);
+    look.node.text = lines.slice(-40).join('\n') + '\n';
+    look.node.type = 'text';
+    keepMark(sh.fs, path);
+}
+
+//  A line in sulog: who tried su, and whether it took
+function unixSulog(sh, ok) {
+    var look = fsLook(sh.fs, '/', sh.w.lay.adm + '/sulog', { root: true });
+    if (!look.node || look.node.dir) return;
+    var d = new Date();
+    var md = (d.getMonth() < 9 ? '0' : '') + (d.getMonth() + 1) + '/' + (d.getDate() < 10 ? '0' : '') + d.getDate();
+    var lines = fsText(look.node).split('\n').filter(function (l) { return l; });
+    lines.push('SU ' + md + ' ' + keepClock(nowMs()) + ' ' + (ok ? '+' : '-') + ' ' + sh.tty + ' ' + sh.user + '-root');
+    look.node.text = lines.slice(-30).join('\n') + '\n';
+    keepMark(sh.fs, look.path);
 }
 
 //  Commands an admin wouldn't notice much: looking around, not reading or
@@ -2876,6 +3310,7 @@ function unixWrite(sh, path, text, append) {
         delete look.node.size;
         look.node.type = 'text';
         look.node.mt = fsDate(0, function () { return 0.5; });
+        keepMark(sh.fs, look.path);
         return true;
     }
     if (!look.parent || !fsCan(look.parent, sh.who, 'w')) {
@@ -2883,6 +3318,7 @@ function unixWrite(sh, path, text, append) {
         return false;
     }
     look.parent.kids[look.name] = fsFile(sh.who.user, sh.who.groups[0], 'rw-r--r--', text, fsDate(0, function () { return 0.5; }));
+    keepMark(sh.fs, look.path);
     return true;
 }
 
@@ -3200,6 +3636,7 @@ var UNIX_CMDS = {
             if (look.node) { say('mkdir: ' + path + ': File exists\n'); return; }
             if (look.err || !look.parent || !fsCan(look.parent, sh.who, 'w')) { say('mkdir: cannot access ' + path.replace(/\/[^/]*$/, '') + '\n'); return; }
             look.parent.kids[look.name] = fsDir(sh.who.user, sh.who.groups[0], 'rwxr-xr-x', fsDate(0, function () { return 0.5; }));
+            keepMark(sh.fs, look.path);
         });
     },
     touch: function (sh, a, say) {
@@ -3218,6 +3655,7 @@ var UNIX_CMDS = {
             if (!fsCan(look.parent, sh.who, 'w')) { say('rm: ' + path + ' not removed. Permission denied\n'); return; }
             if (/\/adm\/wtmp$/.test(look.path)) cleaned(sh.ctx, sh.io);
             delete look.parent.kids[look.name];
+            keepMark(sh.fs, look.path);
         });
     },
     rmdir: function (sh, a, say) {
@@ -3227,6 +3665,7 @@ var UNIX_CMDS = {
             if (Object.keys(look.node.kids).length) { say('rmdir: ' + path + ': Directory not empty\n'); return; }
             if (!fsCan(look.parent, sh.who, 'w')) { say('rmdir: ' + path + ': Permission denied\n'); return; }
             delete look.parent.kids[look.name];
+            keepMark(sh.fs, look.path);
         });
     },
     cp: function (sh, a, say) { unixCopy(sh, a, say, false); },
@@ -3243,6 +3682,7 @@ var UNIX_CMDS = {
             if (look.err || !look.node) { say('chmod: can\'t access ' + path + '\n'); return; }
             if (!sh.who.root && look.node.own !== sh.who.user) { say('chmod: can\'t change ' + path + ': Not owner\n'); return; }
             look.node.mode = bits;
+            keepMark(sh.fs, look.path);
         });
     },
     who: function (sh, a, say) { unixWhoList(sh, say, 'who'); },
@@ -3266,7 +3706,15 @@ var UNIX_CMDS = {
     last: function (sh, a, say) {
         var w = sh.w;
         var t = era().unix;
-        say(fit(sh.user, 9) + 'tty1a    ' + t.slice(0, 16) + '   still logged in\n');
+        say(fit(sh.user, 9) + fit(sh.tty || 'tty1a', 9) + t.slice(0, 11) + keepClock(sh.on || nowMs()) + '   still logged in\n');
+        //  callers before this one, newest first
+        var now = nowMs();
+        keepSeen(sh.ctx.seed, w.h.num).reverse().forEach(function (x) {
+            if (x.on === sh.on && x.id === String(v3.user.id)) return;
+            var span = x.off ? keepClock(x.on) + ' - ' + keepClock(x.off) + '  (' + unixSpan(x.off - x.on) + ')' :
+                now - x.on < KEEP_ON_MS ? keepClock(x.on) + '   still logged in' : keepClock(x.on) + ' - crash';
+            say(fit(x.u, 9) + fit(x.tty, 9) + t.slice(0, 11) + span + '\n');
+        });
         say(fit(w.boss, 9) + 'console  ' + t.slice(0, 10) + ' 08:02 - 17:44  (09:42)\n');
         w.peers.slice(0, 3).forEach(function (n, i) {
             say(fit(n, 9) + 'tty2a    ' + t.slice(0, 10) + ' ' + (13 - i) + ':15 - ' + (13 - i) + ':58  (00:43)\n');
@@ -3312,7 +3760,9 @@ var UNIX_CMDS = {
         var spw = sh.io.line(false);
         if (spw === null) return 'exit';
         sh.io.out('\r\n');
-        if (findAccount(sh.ctx.host, 'root', spw, false)) {
+        var ok = !!unixAuth(sh.ctx, 'root', spw);
+        unixSulog(sh, ok);
+        if (ok) {
             sh.priv = true;
             sh.who = unixWho(sh.w, sh.user, true);
             var rep = breakIn(sh.ctx.p, sh.ctx.host, true);
@@ -3323,6 +3773,7 @@ var UNIX_CMDS = {
         }
     },
     passwd: function (sh, a, say) {
+        if (sh.priv && (!a[0] || a[0] === 'root')) return unixRootPasswd(sh, say);
         sh.io.out('Changing password for ' + sh.who.user + '\r\nOld password:');
         if (sh.io.line(false) === null) return 'exit';
         sh.io.out('\r\nNew password:');
@@ -3344,6 +3795,37 @@ var UNIX_CMDS = {
 };
 
 //  NeXT: NetInfo hands its maps to anyone who asks, passwords and all
+//  passwd as root: root's password is theirs now, and whoever had it can't
+//  su any more. The password file shows the new one to Crack.
+function unixRootPasswd(sh, say) {
+    var io = sh.io;
+    io.out('New password:');
+    var p1 = io.line(false);
+    if (p1 === null) return 'exit';
+    io.out('\r\nRe-enter new password:');
+    var p2 = io.line(false);
+    if (p2 === null) return 'exit';
+    io.out('\r\n');
+    if (p1 !== p2) { say('They don\'t match; try again.\n'); return; }
+    if (!p1) { say('Password unchanged.\n'); return; }
+    var w = sh.w;
+    keepSetPassword(sh.ctx, 'root', p1);
+    sh.ctx.ov.pw.root = p1;
+    var old = unixCrypt(w.h.num + '|root|' + w.rootNow);
+    w.rootNow = p1;
+    //  the password file as it is now, generated or kept
+    ['/etc/passwd', '/etc/shadow'].forEach(function (path) {
+        var look = fsLook(sh.fs, '/', path, { root: true });
+        if (!look.node || typeof look.node.text === 'function') return;
+        var t = look.node.text.replace(old, unixCrypt(w.h.num + '|root|' + p1));
+        if (t !== look.node.text) {
+            look.node.text = t;
+            keepMark(sh.fs, look.path);
+        }
+    });
+    io.say('Root\'s password is yours now. Anyone holding the old one is locked out of su. Careful what you leave behind.');
+}
+
 function unixNidump(sh, a, say) {
     if (sh.fl !== 'next') { say('sh: nidump: not found\n'); return; }
     var map = a[0];
@@ -3357,7 +3839,8 @@ function unixNidump(sh, a, say) {
     } else if (map === 'group') {
         say(unixGroup(sh.w));
     } else if (map === 'hosts') {
-        say(fsText(fsLook(sh.fs, '/', '/etc/hosts', { root: true }).node));
+        var hosts = fsLook(sh.fs, '/', '/etc/hosts', { root: true }).node;
+        say(hosts && !hosts.dir ? fsText(hosts) : '');
     } else {
         say('nidump: unknown format ' + map + '\n');
     }
@@ -3389,6 +3872,14 @@ function unixUdbsee(sh, a, say) {
         gotLoot(c, io, '/etc/passwd');
         io.say('The user database: every account on the Cray, password and all.');
     }]);
+}
+
+//  A length of time as last shows it: (hh:mm)
+function unixSpan(ms) {
+    var m = Math.max(0, Math.round(ms / 60000));
+    var h = Math.floor(m / 60);
+    m %= 60;
+    return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
 }
 
 function unixHeadTail(sh, a, say, head) {
@@ -3425,7 +3916,10 @@ function unixCopy(sh, a, say, move) {
     if (src.node.onRead) sh.after = (sh.after || []).concat([src.node.onRead]);
     var text = src.node.type === 'text' ? fsText(src.node) : '';
     if (!unixWrite(sh, to, text, false)) return;
-    if (move) delete src.parent.kids[src.name];
+    if (move) {
+        delete src.parent.kids[src.name];
+        keepMark(sh.fs, src.path);
+    }
 }
 
 function unixWhoList(sh, say, how) {
@@ -3434,9 +3928,14 @@ function unixWhoList(sh, say, how) {
     var list = w.peers.slice(0, Math.min(4, w.h.users)).filter(function (n) { return n !== sh.user; });
     if (how !== 'who') say(fit('Login', 9) + fit('TTY', 9) + 'Idle   What\n');
     if (adminOnline(sh.ctx)) say(fit(w.boss, 9) + fit('console', 9) + (how === 'who' ? t.slice(4, 16) : '   0   vi /etc/passwd') + '\n');
-    list.concat([sh.user]).forEach(function (n, i) {
+    list.forEach(function (n, i) {
         say(fit(n, 9) + fit('tty' + i + 'a', 9) + (how === 'who' ? t.slice(4, 16) : padStart(String(i * 7), 4) + '   -sh') + '\n');
     });
+    //  other callers on this machine right now, under the account they used
+    keepOthersOn(sh.ctx.seed, w.h.num).forEach(function (x) {
+        say(fit(x.u, 9) + fit(x.tty, 9) + (how === 'who' ? t.slice(4, 11) + keepClock(x.on) : '   0   -sh') + '\n');
+    });
+    say(fit(sh.user, 9) + fit(sh.tty || 'tty0a', 9) + (how === 'who' ? t.slice(4, 11) + keepClock(sh.on || nowMs()) : '   0   -sh') + '\n');
 }
 
 //  mail: the caller's mailbox, a message at a time, or a message to send
@@ -3444,18 +3943,24 @@ function unixMail(sh, a, say) {
     var io = sh.io;
     if (a.length) {
         io.out(unixLines('Subject: '));
-        if (io.line(true) === null) return 'exit';
+        var subj = io.line(true);
+        if (subj === null) return 'exit';
+        var body = [];
         for (;;) {
             var l = io.line(true);
             if (l === null) return 'exit';
             if (l === '.' || l === '\x04') break;
+            body.push(l);
         }
         if (a[0] === sh.w.boss) addHeat(sh.ctx.p, 2);
-        say(sh.w.staff.indexOf(a[0]) >= 0 || a[0] === 'root' ? '' : a[0] + '... User unknown\n');
+        if (!unixKnownUser(sh, a[0])) { say(a[0] + '... User unknown\n'); return; }
+        //  it waits there for whoever logs in as them, players included
+        if (a[0] !== sh.w.boss) keepSendMail(sh.ctx, a[0], sh.who.user, subj.slice(0, 60), body.join('\n').slice(0, 1000));
         return;
     }
     var box = fsLook(sh.fs, '/', sh.w.lay.mail + '/' + sh.who.user, { root: true }).node;
-    var text = box ? fsText(box) : '';
+    //  mail to the name they logged in under, too, when that's a uid 0 backdoor
+    var text = (box ? fsText(box) : '') + unixPlayerMail(sh, sh.who.user) + (sh.user !== sh.who.user ? unixPlayerMail(sh, sh.user) : '');
     var msgs = text.split(/\n(?=From )/).filter(function (m) { return /^From /.test(m); });
     if (!msgs.length) { say('No mail.\n'); return; }
     var head = function () {
@@ -3487,6 +3992,24 @@ function unixMail(sh, a, say) {
     }
 }
 
+//  Whether the host has an account called user: in its password file, a
+//  backdoor, or one a caller used
+function unixKnownUser(sh, user) {
+    var w = sh.w;
+    if (user === 'root' || w.staff.indexOf(user) >= 0) return true;
+    if (unixSystemUsers(w.lay).some(function (u) { return u[0] === user; })) return true;
+    if (unixBackdoors(sh.ctx.ov)[user]) return true;
+    return keepSeen(sh.ctx.seed, w.h.num).some(function (x) { return x.u === user; });
+}
+
+//  Mail callers sent to user on this host, as the mailbox holds it
+function unixPlayerMail(sh, user) {
+    var t = era().unix;
+    return keepMail(sh.ctx.seed, sh.w.h.num).filter(function (m) { return m.to === user; }).map(function (m) {
+        return '\nFrom ' + m.from + ' ' + t.slice(0, 11) + keepClock(m.at) + ' 1993\nTo: ' + m.to + '\nSubject: ' + m.subj + '\n\n' + m.body + '\n';
+    }).join('');
+}
+
 function unixWriteTo(sh, a, say) {
     if (!a[0]) { say('usage: write user [ttyname]\n'); return; }
     if (a[0] !== sh.w.boss) { say('write: ' + a[0] + ' has messages disabled\n'); return; }
@@ -3498,13 +4021,25 @@ function unixWriteTo(sh, a, say) {
 function unixRlogin(sh, a, say) {
     var w = sh.w;
     var to = a[0] || '';
-    if (!w.sister || to !== w.sisterName) {
-        say(to ? to + ': unknown host\n' : 'usage: rlogin host [ -l username ]\n');
-        return;
-    }
     var li = a.indexOf('-l');
     var as = li >= 0 && a[li + 1] ? a[li + 1] : sh.who.user;
-    if (as === 'root' && !sh.priv) {
+    if (!w.sister || to !== w.sisterName) {
+        //  a machine a player opened with a .rhosts of + +
+        var num = to ? unixTrusting(sh, to, as) : '';
+        if (!num) {
+            say(to ? (unixFoundNamed(sh, to) ? 'Permission denied.\n' : to + ': unknown host\n') : 'usage: rlogin host [ -l username ]\n');
+            if (to && unixFoundNamed(sh, to)) failedLogin(sh.ctx);
+            return;
+        }
+        var th = hostAtNum(sh.ctx, num, 'unix');
+        th.accounts = th.accounts.concat((sh.ctx.p.cracked || {})[num] || []);
+        sh.ctx.p.hops = (sh.ctx.p.hops || 0) + 1;
+        runUnix({ p: sh.ctx.p, host: th, seed: sh.ctx.seed }, sh.io, [as, '', as === 'root']);
+        if (sh.io.over) return 'exit';
+        say('Connection closed.\n');
+        return;
+    }
+    if (as === 'root' && !sh.priv && !unixTrusting(sh, to, as)) {
         say('Permission denied.\n');
         failedLogin(sh.ctx);
         return;
@@ -3517,6 +4052,38 @@ function unixRlogin(sh, a, say) {
     runUnix(sctx, sh.io, [as, '', as === 'root']);
     if (sh.io.over) return 'exit';
     say('Connection closed.\n');
+}
+
+//  The number of a UNIX host on the caller's found list called name
+function unixFoundNamed(sh, name) {
+    var found = sh.ctx.p.found || {};
+    var nums = Object.keys(found).filter(function (n) { return found[n] === 'unix'; });
+    for (var i = 0; i < nums.length; i++) {
+        if (hostAtNum(sh.ctx, nums[i], 'unix').name.toLowerCase() === name) return nums[i];
+    }
+    return '';
+}
+
+//  The number of host name if it lets user in from anywhere with no
+//  password: a .rhosts in user's home, or an /etc/hosts.equiv for anyone
+//  but root, with a line of + (or + +, or + user) that a player left there
+function unixTrusting(sh, name, user) {
+    var num = unixFoundNamed(sh, name) || (name === sh.w.sisterName ? sh.w.sister : '');
+    if (!num) return '';
+    var ov = keepLoad(sh.ctx.seed, num);
+    var th = hostAtNum(sh.ctx, num, 'unix');
+    var tw = unixWorld({ p: sh.ctx.p, host: th, seed: sh.ctx.seed, ov: ov });
+    var home = user === 'root' ? '' : unixHome(tw, user);
+    var plus = function (path, who) {
+        var e = ov.p[path];
+        if (!e || e.rm) return false;
+        return String(e.x || '').split('\n').some(function (l) {
+            var f = l.trim().split(/\s+/);
+            return f[0] === '+' && (!f[1] || f[1] === '+' || f[1] === who);
+        });
+    };
+    if (plus(home + '/.rhosts', user) || (user !== 'root' && plus('/etc/hosts.equiv', user))) return num;
+    return '';
 }
 // ---- end lib/carrier_unix.js ----
 // ---- lib/carrier_vms.js ----
@@ -8477,7 +9044,7 @@ function crackPick() {
     var files = Object.keys(P.loot).filter(function (n) {
         var l = P.loot[n];
         return P.found[n] === 'unix' && (l === 1 || String(l).split(',').indexOf('main') >= 0) &&
-            !(P.cracked || {})[n] && !(P.jobs || []).some(function (j) { return j.num === n; });
+            (!(P.cracked || {})[n] || crackStale(P, SEASON.seed, n)) && !(P.jobs || []).some(function (j) { return j.num === n; });
     });
     if (!files.length) {
         out(at(H - 2, 1) + YEL + center('No passwd files to crack. cat /etc/passwd on a UNIX box first.', W) + BLK);
@@ -8487,6 +9054,8 @@ function crackPick() {
     var items = files.slice(0, 10).map(function (n) { return { label: fmtNum(n), id: n }; });
     out(box(6, 24, 34, items.length + 2, BLUE, 'Crack which passwd?'));
     var pickNum = lightbarNoHot(items, 7, 25, 32, 0);
+    //  root's password changed since the last run: Crack goes again
+    if (pickNum && crackStale(P, SEASON.seed, pickNum) && P.cracked) delete P.cracked[pickNum];
     if (pickNum && startCrack(P, pickNum)) {
         savePlayer(P);
         out(at(H - 2, 1) + GRN + center('Crack 4.1 is grinding through the wordlist. Check back in ' + CRACK_MINUTES + ' minutes.', W) + BLK);

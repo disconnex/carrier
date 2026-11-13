@@ -240,9 +240,10 @@ contributed gets rep and codes, and the top contributors are named.
    - **The Top Ten**: its own door on the doors menu (`t`), with callers,
      posters, uploaders and downloaders, and CARRiER's rep and first
      finds read from the game's store.
-6. **Real systems** (in progress: steps 1 and 2 of 7 live on City of Thieves;
+6. **Real systems** (in progress: steps 1 and 2 of 7 live on City of Thieves,
+   step 3 built for UNIX;
    see Real systems below). Every host gets a filesystem and a shell like
-   the real one; next is persistence (step 3).
+   the real one, and what players leave on UNIX hosts now lasts (step 3).
 
 ## Real systems (phase 6, in progress)
 
@@ -365,7 +366,12 @@ What a player can do:
   `+ +`. Next time, you log in with it and skip the hunt.
 - **Take a box**: change the admin's password (the "taking over a box"
   idea from the hook table). The next player finds the old one doesn't
-  work.
+  work. Taking it leaves a trail, where it would have been in 1993: root's
+  shell history holds what was typed as root (the `passwd`, the backdoor
+  line), `sulog` names the account they came in on, and the password file
+  carries the new password's hash, which Crack breaks if it's a word, a
+  user's name, or six lowercase letters or fewer. A taker who cleans up
+  and picks a good password holds the box longer.
 - **Leave mail**: in-game mail on a host reaches another player who logs
   in there.
 - **Be seen**: `who`, `w` and `last` include other CoT callers who are on
@@ -543,8 +549,22 @@ In steps, each playable:
        the prize is the CPU allocations (40 rep).
      The notebook has a page for each (hackfaq.txt, cert9106.txt,
      ciac.b17).
-3. **Persistence** (next): the overlay, writing commands, backdoors, mail, other
-   players in `who`.
+3. **Persistence** (built for UNIX 2026-11-13: src/lib/carrier_keep.js).
+   Each host's changes are kept per season in the game's store, laid over
+   the generated tree on the next call, and saved after every command, so
+   two players on one box don't undo each other. Kept: files written,
+   made, removed, moved and chmodded; root's password set with `passwd`
+   (which locks the old one out of `su` and the root login); mail sent to
+   an account there. A line with no password added to `/etc/passwd` (or
+   with an empty shadow entry) is a login with no password, root if its
+   uid is 0. A `.rhosts` or `/etc/hosts.equiv` holding `+` lets `rlogin`
+   in from any UNIX box the player has found. `who`, `w` and `last` show
+   other players on the host now or lately, under the account they used.
+   A player whose file or password someone else changed is told so on
+   their next game, but not by whom. Limits: 16 changed files and 8 KB per
+   host, 20 changes per player (the oldest goes back). Next: the same for
+   VMS (AUTHORIZE, SYSUAF), PRIMOS and MPE; `ed`; live `write` between two
+   players on one box.
 4. **Admin sweeps** and hiding.
 5. **The landmarks**, a few at a time, with their area codes.
 6. **The CTF engine** and the first season's CTF.

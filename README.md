@@ -115,8 +115,9 @@ board.
 ## Player data
 
 Everything is in `scripts/data/carrier.json`: players, finds, the season,
-raids, the Scene Daily and the Hall of Fame. Back it up with the rest of your
-board.
+raids, the Scene Daily, the Hall of Fame, and what players have left on the
+systems they broke into (files, backdoors, changed passwords, mail), which
+goes when the season ends. Back it up with the rest of your board.
 
 - **Reset everything:** make sure nobody is playing, then delete the file. The next
   player to start a game begins season 1 on a new network.

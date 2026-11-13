@@ -3,8 +3,8 @@
 //  host, with owners and permissions, that the host's shell walks. A host's
 //  tree is built from the season seed when a call connects (carrier_unix.js
 //  builds a UNIX one); a file's text is made only when it's read. What the
-//  caller changes during a call goes into the tree itself, so it lasts the
-//  call; phase 6 step 3 keeps it longer.
+//  caller changes goes into the tree, and carrier_keep.js keeps it for the
+//  callers after them.
 //
 //  A node is a directory, a file or a symbolic link:
 //    { dir: true, kids: { name: node }, own, grp, mode, mt }
@@ -137,6 +137,25 @@ function fsLook(fs, cwd, path, who, noFollow, depth) {
         d = n;
     }
     return { node: fs.root, parent: null, name: '/', path: '/' };
+}
+
+//  The path with the links on the way to its last part resolved, as
+//  /etc/passwd is /private/etc/passwd on a NeXT
+function fsReal(fs, abs) {
+    var parts = fsSplit(abs);
+    var d = fs.root;
+    var out = [];
+    for (var i = 0; i < parts.length - 1; i++) {
+        var n = d && d.dir ? d.kids[parts[i]] : null;
+        if (n && n.link) {
+            var to = n.link.charAt(0) === '/' ? n.link : '/' + out.join('/') + '/' + n.link;
+            return fsReal(fs, to + '/' + parts.slice(i + 1).join('/'));
+        }
+        out.push(parts[i]);
+        d = n;
+    }
+    if (parts.length) out.push(parts[parts.length - 1]);
+    return '/' + out.join('/');
 }
 
 //  A file's text (made the first time it's read)

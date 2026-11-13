@@ -3,6 +3,7 @@
 //@include lib/carrier_game.js
 //@include lib/carrier_notes.js
 //@include lib/carrier_fs.js
+//@include lib/carrier_keep.js
 //@include lib/carrier_unix.js
 //@include lib/carrier_vms.js
 //@include lib/carrier_prime.js
@@ -1190,7 +1191,7 @@ function crackPick() {
     var files = Object.keys(P.loot).filter(function (n) {
         var l = P.loot[n];
         return P.found[n] === 'unix' && (l === 1 || String(l).split(',').indexOf('main') >= 0) &&
-            !(P.cracked || {})[n] && !(P.jobs || []).some(function (j) { return j.num === n; });
+            (!(P.cracked || {})[n] || crackStale(P, SEASON.seed, n)) && !(P.jobs || []).some(function (j) { return j.num === n; });
     });
     if (!files.length) {
         out(at(H - 2, 1) + YEL + center('No passwd files to crack. cat /etc/passwd on a UNIX box first.', W) + BLK);
@@ -1200,6 +1201,8 @@ function crackPick() {
     var items = files.slice(0, 10).map(function (n) { return { label: fmtNum(n), id: n }; });
     out(box(6, 24, 34, items.length + 2, BLUE, 'Crack which passwd?'));
     var pickNum = lightbarNoHot(items, 7, 25, 32, 0);
+    //  root's password changed since the last run: Crack goes again
+    if (pickNum && crackStale(P, SEASON.seed, pickNum) && P.cracked) delete P.cracked[pickNum];
     if (pickNum && startCrack(P, pickNum)) {
         savePlayer(P);
         out(at(H - 2, 1) + GRN + center('Crack 4.1 is grinding through the wordlist. Check back in ' + CRACK_MINUTES + ' minutes.', W) + BLK);

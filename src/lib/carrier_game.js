@@ -467,8 +467,13 @@ function finishCracks(p, seed) {
         var r = rng(hash32(seed + '|crack|' + j.num));
         var users = someUsersFor(j.num, 5);
         var accts = [[users[1], pick(r, CRACK_WORDS), false], [users[3], pick(r, CRACK_WORDS), false]];
+        //  a root password a player set falls to the wordlist if it's weak
+        var rootNow = keepLoad(seed, j.num).pw.root;
+        if (rootNow !== undefined && crackWeak(rootNow, users)) accts.push(['root', rootNow, true]);
         p.cracked = p.cracked || {};
         p.cracked[j.num] = accts;
+        p.crackedAt = p.crackedAt || {};
+        p.crackedAt[j.num] = now;
         var res = { num: j.num, accounts: accts, reused: '' };
         var host = { num: j.num, kind: 'unix' };
         var next = neighbours(seed, host, 'unix', 1)[0];
@@ -482,6 +487,25 @@ function finishCracks(p, seed) {
         return false;
     });
     return done;
+}
+
+//  Words Crack's dictionary has besides CRACK_WORDS
+var CRACK_MORE = ['password', 'root', 'toor', 'admin', 'system', 'unix', 'hacker', 'god', 'love', 'sex', 'secret1', 'test',
+    'guest', 'master', 'cracker', 'phreak', 'elite', 'eleet', 'owned', 'r00t', 'h4x0r', 'carrier', 'modem', 'wargames'];
+
+//  Whether Crack 4.1 would get pw: a dictionary word, a user's name, or
+//  six lowercase letters or fewer
+function crackWeak(pw, users) {
+    var lw = String(pw).toLowerCase();
+    return CRACK_WORDS.indexOf(lw) >= 0 || CRACK_MORE.indexOf(lw) >= 0 || (users || []).indexOf(lw) >= 0 ||
+        /^[a-z]{1,6}$/.test(pw);
+}
+
+//  Whether root's password on num was changed after the player last ran
+//  Crack there, so another run is worth it
+function crackStale(p, seed, num) {
+    var by = keepLoad(seed, num).pwBy.root;
+    return !!by && by[2] > ((p.crackedAt || {})[num] || 0);
 }
 
 //  The made-up users of a host (as carrier_hosts.js someUsers names them)
@@ -710,6 +734,7 @@ function currentSeason() {
         boss: s.bossDown || '', raids: raids });
     var next = { id: s.id + 1, seed: String(hash32(s.seed + '|next|' + (s.id + 1))), started: today() };
     v3.data.set('season', next);
+    keepForget();
     news('the scene', 'Season ' + s.id + ' is over' + (s.bossDown ? ': ' + s.bossDown + ' cracked the phone company.' : '.') + ' The network is new.');
     seasonTips(next);
     return next;
@@ -916,5 +941,5 @@ function collectMail(p) {
             v3.data.delete(k);
         }
     });
-    return notes;
+    return notes.concat(keepNotices());
 }
